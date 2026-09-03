@@ -1,0 +1,390 @@
+/* Токены темы — извлечены из макетов Framer (framer-export/*.json).
+   Светлая — по умолчанию; тёмная — через data-theme="dark".
+   Оверлеи (hover/border) заданы полупрозрачным чёрным/белым и сами
+   инвертируются между темами — не нужно дублировать hover-стили. */
+:root {
+  /* поверхности */
+  --bg: #f6f8fb;
+  --bg2: #eff2f7;
+  --card: #ffffff;
+  --surface-alt: #f8fafd; /* шапка таблицы */
+  --border: #e1e7f0;
+  --divider: #e9edf3; /* разделитель строк, светлее border */
+
+  /* текст */
+  --text: #182233;
+  --text-2: #344055; /* тело таблиц, строки списков */
+  --muted: #8792a3;
+
+  --blue: #3560bd;
+  --blue-soft: rgba(53, 96, 189, 0.1);
+  --green: #1a7f4f;
+  --green-soft: #e9f7f0;
+  --red: #d62d2d;
+  --red-soft: rgba(214, 45, 45, 0.12);
+  --orange: #d97706;
+  --orange-soft: rgba(217, 119, 6, 0.12);
+
+  /* состояния ячеек склада — насыщенные, без прозрачности, чтобы плитки читались */
+  --cell-free: #eff2f7;
+  --cell-occupied: #1fb85a;
+  --cell-blocked: #e01b1b;
+
+  --row-hover: rgba(0, 0, 0, 0.04);
+
+  /* радиусы: в макете пять значений вместо одного */
+  --radius: 12px; /* карточка */
+  --radius-sm: 9px; /* кнопка, инпут */
+  --radius-xs: 5px; /* плитка ячейки */
+  --radius-pill: 99px; /* бейдж */
+
+  /* Times New Roman — контент, Inter — мелкие акценты (как в макете).
+     Inter не самохостится: сборки нет, склад может работать без сети.
+     Чтобы поднять точность — положить Inter-{Regular,Bold}.woff2 в
+     app/web/fonts/ и добавить сюда @font-face; стек ниже это переживёт. */
+  --font: "Times New Roman", Times, "Liberation Serif", serif;
+  --font-ui: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, monospace;
+}
+
+[data-theme="dark"] {
+  --bg: #0f1115;
+  --bg2: #14171d;
+  --card: #1a1d24;
+  --surface-alt: #161920;
+  --border: #2a2e37;
+  --divider: #23272f;
+  --text: #e5e7eb;
+  --text-2: #c3c8d1;
+  --muted: #9aa1ac;
+  --green-soft: rgba(26, 127, 79, 0.18);
+  --cell-free: #23272f;
+  --row-hover: rgba(255, 255, 255, 0.05);
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 14px;
+}
+
+a { color: var(--blue); }
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+/* ── Заголовок страницы ─────────────────────────────────────────── */
+
+.page-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+.page-title {
+  font-size: 26px;
+  line-height: 1.1;
+  font-weight: 400;
+  color: var(--text);
+  margin: 0;
+}
+
+/* ── Кнопки ─────────────────────────────────────────────────────── */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 9px 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 14px;
+  cursor: pointer;
+  min-height: 36px;
+}
+.btn:hover { background: var(--row-hover); }
+.btn-primary { background: var(--blue); border-color: transparent; color: #fff; }
+.btn-primary:hover { filter: brightness(1.08); }
+.btn-danger { background: var(--red); border-color: transparent; color: #fff; }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* Компактная акцентная кнопка из макета («+ Зона»): Inter 700, 12px. */
+.btn-accent {
+  font-family: var(--font-ui);
+  font-weight: 700;
+  font-size: 12px;
+  line-height: 1;
+  padding: 9px 12px;
+  min-height: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: rgba(53, 96, 189, 0.6);
+  color: #fff;
+  cursor: pointer;
+}
+.btn-accent:hover { background: rgba(53, 96, 189, 0.75); }
+
+/* Инлайновое действие рядом с заголовком («Зона A · Edit»). */
+.link-action {
+  font-family: var(--font-ui);
+  font-weight: 500;
+  color: var(--blue);
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: inherit;
+  cursor: pointer;
+}
+.link-action:hover { text-decoration: underline; }
+
+/* ── Поля ввода ─────────────────────────────────────────────────── */
+
+.input, select.input, textarea.input {
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 16px; /* без зума на мобильных при фокусе */
+}
+.input:focus, select.input:focus, textarea.input:focus {
+  outline: 2px solid var(--blue-soft);
+  border-color: var(--blue);
+}
+
+/* Поиск с иконкой (макет /goods). Инпут внутри — без своей рамки. */
+.search-field {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 38px;
+  padding: 0 12px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.search-field svg { flex: none; color: var(--muted); }
+.search-field .input {
+  border: none;
+  background: none;
+  padding: 0;
+  height: 100%;
+  font-size: 14px;
+}
+.search-field .input:focus { outline: none; }
+.search-field:focus-within { border-color: var(--blue); }
+
+/* ── Таблицы ────────────────────────────────────────────────────── */
+
+table { width: 100%; border-collapse: collapse; }
+th, td { padding: 10px 14px; text-align: left; border-bottom: 1px solid var(--divider); }
+th {
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 1;
+  color: var(--muted);
+  background: var(--surface-alt);
+  position: sticky;
+  top: 0;
+}
+td { font-size: 13px; color: var(--text-2); }
+tbody tr:last-child td { border-bottom: none; }
+tbody tr:hover { background: var(--row-hover); }
+.num { font-variant-numeric: tabular-nums; text-align: right; }
+
+/* ── Карточка списка (макеты /supply, /fbs-orders, /goods) ──────── */
+
+.list-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 18px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.list-card + .list-card { margin-top: 10px; }
+.list-card__title { font-size: 15px; line-height: 1.2; color: var(--text); }
+.list-card__meta { font-size: 12px; line-height: 1.2; color: var(--muted); }
+
+/* ── KPI-плитка (макет /remains) ────────────────────────────────── */
+
+.stat-card {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 14px;
+  background: rgba(53, 96, 189, 0.5);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+/* В макете подпись плитки — #8792A3, но на синей заливке она нечитаема
+   (контраст ~1.6:1). Тон сохранён, светлота поднята до читаемой. */
+.stat-card__label { font-size: 11px; line-height: 1; color: rgba(24, 34, 51, 0.65); }
+.stat-card__value { font-size: 20px; line-height: 1; color: var(--text); font-variant-numeric: tabular-nums; }
+
+/* ── Карта склада ───────────────────────────────────────────────── */
+
+.zone-card {
+  background: rgba(53, 96, 189, 0.5);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 18px;
+}
+.zone-card + .zone-card { margin-top: 20px; }
+
+/* ── Меню-поповер ───────────────────────────────────────────────── */
+/* Точка входа для вторичных действий: вместо россыпи иконок — одна тихая
+   ссылка, открывающая меню. position: fixed обязателен — .sb-content имеет
+   overflow: auto и обрезал бы абсолютно спозиционированный поповер. */
+
+.menu {
+  position: fixed;
+  z-index: 1400;
+  min-width: 200px;
+  padding: 4px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 8px 28px rgba(24, 34, 51, 0.16);
+  display: flex;
+  flex-direction: column;
+}
+/* display:flex перебивает [hidden] (одинаковая специфичность, правило ниже) —
+   без этого скрытое меню видно пустой полоской. */
+.menu[hidden] { display: none; }
+.menu-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 9px 12px;
+  border: none;
+  border-radius: var(--radius-xs);
+  background: none;
+  color: var(--text-2);
+  font-family: var(--font);
+  font-size: 13px;
+  line-height: 1.2;
+  cursor: pointer;
+}
+.menu-item:hover, .menu-item:focus-visible { background: var(--row-hover); }
+.menu-item--danger { color: var(--red); }
+.menu-sep { height: 1px; margin: 4px 0; background: var(--divider); }
+
+/* ── Бейдж (компонент Fulfil/Status badge) ──────────────────────── */
+
+.badge {
+  display: inline-block;
+  padding: 6px 9px;
+  border-radius: var(--radius-pill);
+  font-size: 11px;
+  line-height: 1;
+}
+.badge-green { background: var(--green-soft); color: var(--green); }
+.badge-red { background: var(--red-soft); color: var(--red); }
+.badge-orange { background: var(--orange-soft); color: var(--orange); }
+.badge-blue { background: var(--blue-soft); color: var(--blue); }
+.badge-muted { background: var(--bg2); color: var(--muted); }
+
+/* ── Модалка. Была скопирована в products/stock/storage-map ─────── */
+
+.modal-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(24, 34, 51, 0.4);
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 16px;
+}
+.modal-overlay.open { display: flex; }
+.modal {
+  background: var(--card);
+  border-radius: var(--radius);
+  padding: 20px;
+  width: 380px;
+  max-width: 100%;
+  max-height: 100%;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.modal h2 { margin: 0 0 4px; font-size: 16px; font-weight: 400; }
+
+/* ── Служебное ──────────────────────────────────────────────────── */
+
+.toast {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  z-index: 1500;
+  padding: 12px 16px;
+  border-radius: var(--radius-sm);
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--blue);
+  box-shadow: 0 6px 24px rgba(24, 34, 51, 0.15);
+  max-width: 360px;
+  opacity: 0;
+  transform: translateY(-8px);
+  transition: opacity 150ms ease-out, transform 150ms ease-out;
+  pointer-events: none;
+}
+.toast.show { opacity: 1; transform: translateY(0); }
+.toast.success { border-left-color: var(--green); }
+.toast.error { border-left-color: var(--red); }
+.toast.warning { border-left-color: var(--orange); }
+
+.empty-state { padding: 48px 16px; text-align: center; color: var(--muted); }
+
+.scan-layout-banner {
+  position: fixed;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--orange-soft);
+  color: var(--orange);
+  border: 1px solid var(--orange);
+  border-radius: var(--radius-sm);
+  padding: 10px 16px;
+  font-size: 13px;
+  z-index: 1500;
+  max-width: 90vw;
+}
+
+@media (max-width: 768px) {
+  .page-title { font-size: 22px; }
+  .btn { min-height: 44px; }
+  table:not(.no-mobile-cards) thead { display: none; }
+  table:not(.no-mobile-cards) tr {
+    display: block;
+    border-bottom: 8px solid var(--bg);
+  }
+  table:not(.no-mobile-cards) td {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    border-bottom: 1px solid var(--divider);
+  }
+  table:not(.no-mobile-cards) td[data-label]::before {
+    content: attr(data-label);
+    color: var(--muted);
+  }
+}

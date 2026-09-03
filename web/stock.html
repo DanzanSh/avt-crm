@@ -1,0 +1,397 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Остатки — Fulfil</title>
+  <link rel="stylesheet" href="/css/theme.css" />
+  <script src="/js/core.js"></script>
+  <script src="/js/scan-layout.js"></script>
+  <style>
+    .tabs { display: flex; gap: 6px; margin-bottom: 18px; }
+    .tab-btn {
+      padding: 8px 14px;
+      border-radius: var(--radius-sm);
+      border: 1px solid var(--border);
+      background: var(--card);
+      color: var(--text-2);
+      font-family: var(--font);
+      cursor: pointer;
+      font-size: 13px;
+    }
+    .tab-btn:hover { background: var(--row-hover); }
+    .tab-btn.active { background: var(--blue); color: #fff; border-color: transparent; }
+    .stock-summary { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 18px; }
+    .stock-summary .stat-card { min-width: 180px; }
+    .oversold { color: var(--red); font-size: 12px; margin-top: 2px; }
+    /* Внутренняя таблица по ячейкам: колонки по содержимому, а не на всю ширину. */
+    .by-cell-table { width: auto; margin-top: 4px; }
+    .by-cell-table td { padding: 6px 8px; border-bottom: none; white-space: nowrap; }
+    .by-cell-table td:first-child { padding-left: 0; }
+    .by-cell-table tr:hover { background: none; }
+    .btn-sm { padding: 4px 10px; font-size: 12px; min-height: unset; }
+    .row-toggle { cursor: pointer; }
+    .row-toggle .chevron { display: inline-block; transition: transform .15s; margin-right: 4px; color: var(--muted); }
+    .row-toggle.open .chevron { transform: rotate(90deg); }
+    .filters-row { display: flex; gap: 8px; margin-bottom: 18px; flex-wrap: wrap; align-items: center; }
+    .filters-row .input { width: auto; flex: 0 1 220px; min-width: 160px; }
+    .filters-row .btn { flex: none; }
+    .field-row { display: flex; gap: 8px; }
+    .field-row > * { flex: 1; }
+  </style>
+</head>
+<body>
+  <div class="page-head"><h1 class="page-title">Остатки на складе</h1></div>
+
+  <div class="tabs">
+    <button class="tab-btn active" id="tabStock" data-tab="stock">Остатки</button>
+    <button class="tab-btn" id="tabHistory" data-tab="history">История</button>
+  </div>
+
+  <div id="stockView">
+    <div class="stock-summary" id="stockSummary" hidden>
+      <div class="stat-card">
+        <div class="stat-card__label">Доступно</div>
+        <div class="stat-card__value" id="statAvailable">—</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-card__label">Всего на складе</div>
+        <div class="stat-card__value" id="statTotal">—</div>
+      </div>
+    </div>
+
+    <div class="card" style="overflow:auto">
+      <table id="stockTable" class="no-mobile-cards">
+        <thead>
+          <tr>
+            <th></th>
+            <th>Товар</th>
+            <th>Баркод</th>
+            <th class="num">Всего</th>
+            <th class="num">На ФБС</th>
+            <th class="num">Доступно</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="stockBody">
+          <tr><td colspan="7">Загрузка…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div id="historyView" style="display:none">
+    <div class="filters-row">
+      <input class="input" id="histActor" placeholder="Пользователь" />
+      <select class="input" id="histReason">
+        <option value="">Все причины</option>
+        <option value="receipt">Приёмка</option>
+        <option value="pick">Подбор</option>
+        <option value="adjust">Корректировка</option>
+        <option value="move_out">Перемещение (откуда)</option>
+        <option value="move_in">Перемещение (куда)</option>
+        <option value="write_off">Списание</option>
+      </select>
+      <button class="btn" id="btnHistFilter">Применить</button>
+    </div>
+    <div class="card" style="overflow:auto">
+      <table class="no-mobile-cards">
+        <thead>
+          <tr>
+            <th>Дата</th>
+            <th>Товар</th>
+            <th>Ячейка</th>
+            <th class="num">Δ</th>
+            <th class="num">Остаток после</th>
+            <th>Причина</th>
+            <th>Кто</th>
+            <th>Комментарий</th>
+          </tr>
+        </thead>
+        <tbody id="historyBody">
+          <tr><td colspan="8">Загрузка…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="opModal">
+    <div class="modal" id="opModalBody"></div>
+  </div>
+
+  <script src="/js/sidebar.js"></script>
+  <script>
+    const REASON_LABELS = {
+      receipt: 'приёмка', pick: 'подбор', adjust: 'корректировка',
+      move_out: 'перемещение →', move_in: '→ перемещение', write_off: 'списание',
+    };
+
+    document.querySelectorAll('.tab-btn').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.tab-btn').forEach((b) => b.classList.remove('active'));
+        btn.classList.add('active');
+        const isStock = btn.dataset.tab === 'stock';
+        document.getElementById('stockView').style.display = isStock ? '' : 'none';
+        document.getElementById('historyView').style.display = isStock ? 'none' : '';
+        if (!isStock) loadHistory();
+      });
+    });
+
+    async function loadStock() {
+      const body = document.getElementById('stockBody');
+      try {
+        const rows = await Fulfil.api('GET', '/stock');
+
+        // KPI-плитки из макета /remains. Считаются на клиенте по тем же строкам —
+        // отдельной ручки сводки в API нет и она сюда не добавляется.
+        const sum = (key) => rows.reduce((acc, r) => acc + (r[key] || 0), 0);
+        const sht = (n) => n.toLocaleString('ru-RU') + ' шт';
+        document.getElementById('statAvailable').textContent = sht(sum('availableToTransfer'));
+        document.getElementById('statTotal').textContent = sht(sum('total'));
+        document.getElementById('stockSummary').hidden = !rows.length;
+
+        if (!rows.length) {
+          body.innerHTML = '<tr><td colspan="7" class="empty-state">Остатков пока нет</td></tr>';
+          return;
+        }
+        body.innerHTML = rows
+          .map(
+            (r) => `
+          <tr class="row-toggle" data-product-id="${r.productId}">
+            <td><span class="chevron">▶</span></td>
+            <td>${Fulfil.esc(r.productName)}</td>
+            <td style="font-family:var(--mono)">${Fulfil.esc(r.barcode)}</td>
+            <td class="num">${r.total}</td>
+            <td class="num">${r.transferredFbs}</td>
+            <td class="num">${r.availableToTransfer}${r.fbsOversold ? `<div class="oversold">на ФБС на ${r.fbsOversold} больше остатка</div>` : ''}</td>
+            <td><button class="btn btn-primary btn-transfer" data-id="${r.productId}" data-available="${r.availableToTransfer}">На ФБС</button></td>
+          </tr>
+          <tr class="detail-row" data-product-id="${r.productId}" style="display:none">
+            <td></td>
+            <td colspan="6">${renderByCell(r)}</td>
+          </tr>`
+          )
+          .join('');
+
+        document.querySelectorAll('.row-toggle').forEach((row) => {
+          row.addEventListener('click', (e) => {
+            if (e.target.closest('.btn-transfer')) return;
+            row.classList.toggle('open');
+            const detail = document.querySelector(`.detail-row[data-product-id="${row.dataset.productId}"]`);
+            detail.style.display = row.classList.contains('open') ? '' : 'none';
+          });
+        });
+        document.querySelectorAll('.btn-transfer').forEach((btn) => {
+          btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            transferToFbs(btn.dataset.id, Number(btn.dataset.available));
+          });
+        });
+        bindByCellActions();
+      } catch (err) {
+        body.innerHTML = `<tr><td colspan="7" class="empty-state">${Fulfil.esc(Fulfil.errorText(err))}</td></tr>`;
+      }
+    }
+
+    function renderByCell(r) {
+      if (!r.byCell.length) return '<span style="color:var(--muted)">нет остатка по ячейкам</span>';
+      return `<table class="by-cell-table">${r.byCell
+        .map(
+          (c) => `
+        <tr data-product-id="${r.productId}" data-cell-id="${c.cellId}" data-qty="${c.qty}" data-product-name="${Fulfil.esc(r.productName)}">
+          <td style="font-family:var(--mono)">${Fulfil.esc(c.cellAddress)}</td>
+          <td class="num">${c.qty} шт</td>
+          <td><button class="btn btn-sm btn-adjust">Изменить</button></td>
+          <td><button class="btn btn-sm btn-writeoff">Списать</button></td>
+          <td><button class="btn btn-sm btn-move">Переместить</button></td>
+        </tr>`
+        )
+        .join('')}</table>`;
+    }
+
+    function bindByCellActions() {
+      document.querySelectorAll('.btn-adjust').forEach((btn) =>
+        btn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          openAdjustModal(rowData(btn));
+        })
+      );
+      document.querySelectorAll('.btn-writeoff').forEach((btn) =>
+        btn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          openWriteOffModal(rowData(btn));
+        })
+      );
+      document.querySelectorAll('.btn-move').forEach((btn) =>
+        btn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          openMoveModal(rowData(btn));
+        })
+      );
+    }
+
+    function rowData(btn) {
+      const tr = btn.closest('tr');
+      return {
+        productId: tr.dataset.productId,
+        cellId: tr.dataset.cellId,
+        qty: Number(tr.dataset.qty),
+        productName: tr.dataset.productName,
+      };
+    }
+
+    function closeOpModal() {
+      document.getElementById('opModal').classList.remove('open');
+    }
+
+    function openAdjustModal(data) {
+      const body = document.getElementById('opModalBody');
+      body.innerHTML = `
+        <h2>Изменить остаток</h2>
+        <div style="font-size:13px;color:var(--muted)">${Fulfil.esc(data.productName)} · сейчас ${data.qty} шт</div>
+        <div class="field-row"><input class="input" id="opNewQty" type="number" min="0" value="${data.qty}" placeholder="Новое количество" /></div>
+        <div class="field-row"><input class="input" id="opComment" placeholder="Комментарий (обязателен при уменьшении)" /></div>
+        <div class="field-row">
+          <button type="button" class="btn" id="opCancel">Отмена</button>
+          <button type="button" class="btn btn-primary" id="opSubmit">Сохранить</button>
+        </div>`;
+      document.getElementById('opModal').classList.add('open');
+      document.getElementById('opCancel').addEventListener('click', closeOpModal);
+      document.getElementById('opSubmit').addEventListener('click', async () => {
+        const newQty = Number(document.getElementById('opNewQty').value);
+        const comment = document.getElementById('opComment').value || null;
+        try {
+          await Fulfil.api('POST', `/stock/${data.productId}/adjust`, {
+            cellId: Number(data.cellId), newQty, expectedQty: data.qty, comment,
+          });
+          Fulfil.toast('Остаток изменён');
+          closeOpModal();
+          loadStock();
+        } catch (err) {
+          Fulfil.toast(Fulfil.errorText(err), 'error');
+          if (err.reasonCode === 'stock_changed') { closeOpModal(); loadStock(); }
+        }
+      });
+    }
+
+    function openWriteOffModal(data) {
+      const body = document.getElementById('opModalBody');
+      body.innerHTML = `
+        <h2>Списать остаток</h2>
+        <div style="font-size:13px;color:var(--muted)">${Fulfil.esc(data.productName)} · будет списано ${data.qty} шт целиком</div>
+        <div class="field-row"><input class="input" id="opComment" placeholder="Причина списания (обязательно)" required /></div>
+        <div class="field-row">
+          <button type="button" class="btn" id="opCancel">Отмена</button>
+          <button type="button" class="btn btn-danger" id="opSubmit">Списать</button>
+        </div>`;
+      document.getElementById('opModal').classList.add('open');
+      document.getElementById('opCancel').addEventListener('click', closeOpModal);
+      document.getElementById('opSubmit').addEventListener('click', async () => {
+        const comment = document.getElementById('opComment').value.trim();
+        if (!comment) { Fulfil.toast('Укажите причину списания', 'error'); return; }
+        try {
+          await Fulfil.api('POST', `/stock/${data.productId}/write-off`, {
+            cellId: Number(data.cellId), expectedQty: data.qty, comment,
+          });
+          Fulfil.toast('Остаток списан');
+          closeOpModal();
+          loadStock();
+        } catch (err) {
+          Fulfil.toast(Fulfil.errorText(err), 'error');
+          if (err.reasonCode === 'stock_changed') { closeOpModal(); loadStock(); }
+        }
+      });
+    }
+
+    function openMoveModal(data) {
+      const body = document.getElementById('opModalBody');
+      body.innerHTML = `
+        <h2>Переместить</h2>
+        <div style="font-size:13px;color:var(--muted)">${Fulfil.esc(data.productName)} · доступно ${data.qty} шт</div>
+        <div class="field-row"><input class="input" id="opToCell" placeholder="Ячейка назначения (скан/адрес/ШК)" data-scan="auto" autofocus /></div>
+        <div class="field-row"><input class="input" id="opQty" type="number" min="1" max="${data.qty}" value="${data.qty}" placeholder="Количество" /></div>
+        <div class="field-row"><input class="input" id="opComment" placeholder="Комментарий (необязательно)" /></div>
+        <div class="field-row">
+          <button type="button" class="btn" id="opCancel">Отмена</button>
+          <button type="button" class="btn btn-primary" id="opSubmit">Переместить</button>
+        </div>`;
+      document.getElementById('opModal').classList.add('open');
+      document.getElementById('opCancel').addEventListener('click', closeOpModal);
+      document.getElementById('opSubmit').addEventListener('click', async () => {
+        const toCellCode = document.getElementById('opToCell').value.trim();
+        const qty = Number(document.getElementById('opQty').value);
+        const comment = document.getElementById('opComment').value || null;
+        if (!toCellCode || !qty) return;
+        try {
+          await Fulfil.api(
+            'POST',
+            `/stock/${data.productId}/move`,
+            { fromCellId: Number(data.cellId), toCellCode, qty, expectedQty: data.qty, comment },
+            { 'X-Idempotency-Key': Fulfil.newIdempotencyKey() }
+          );
+          Fulfil.toast('Перемещено');
+          closeOpModal();
+          loadStock();
+        } catch (err) {
+          Fulfil.toast(Fulfil.errorText(err), 'error');
+          if (err.reasonCode === 'stock_changed') { closeOpModal(); loadStock(); }
+        }
+      });
+    }
+
+    async function transferToFbs(productId, available) {
+      const qtyStr = prompt(`Сколько передать на ФБС? (доступно ${available})`, String(available));
+      if (!qtyStr) return;
+      const qty = Number(qtyStr);
+      if (!qty || qty <= 0) return;
+      try {
+        const idempotencyKey = `ui-${productId}-${Date.now()}`;
+        const res = await Fulfil.api('POST', `/stock/${productId}/transfer-fbs`, { qty, idempotencyKey });
+        Fulfil.toast(res.status === 'sent' ? `Передано ${res.qty} шт на ФБС` : 'WB не принял передачу', res.status === 'sent' ? 'success' : 'error');
+        loadStock();
+      } catch (err) {
+        Fulfil.toast(Fulfil.errorText(err), 'error');
+      }
+    }
+
+    async function loadHistory() {
+      const body = document.getElementById('historyBody');
+      body.innerHTML = '<tr><td colspan="8">Загрузка…</td></tr>';
+      const params = new URLSearchParams();
+      const actor = document.getElementById('histActor').value.trim();
+      const reason = document.getElementById('histReason').value;
+      if (actor) params.set('actor', actor);
+      if (reason) params.set('reason', reason);
+      params.set('limit', '100');
+      try {
+        const rows = await Fulfil.api('GET', `/stock/moves/history?${params.toString()}`);
+        if (!rows.length) {
+          body.innerHTML = '<tr><td colspan="8" class="empty-state">Движений пока нет</td></tr>';
+          return;
+        }
+        body.innerHTML = rows
+          .map(
+            (m) => `
+          <tr>
+            <td>${new Date(m.createdAt).toLocaleString('ru-RU')}</td>
+            <td>${Fulfil.esc(m.productName)}</td>
+            <td style="font-family:var(--mono)">${Fulfil.esc(m.cellAddress)}</td>
+            <td class="num" style="color:${m.qtyDelta < 0 ? 'var(--red)' : 'var(--green)'}">${m.qtyDelta > 0 ? '+' : ''}${m.qtyDelta}</td>
+            <td class="num">${m.qtyAfter}</td>
+            <td>${Fulfil.esc(REASON_LABELS[m.reason] || m.reason)}</td>
+            <td>${Fulfil.esc(m.actor)}</td>
+            <td>${Fulfil.esc(m.comment || '')}</td>
+          </tr>`
+          )
+          .join('');
+      } catch (err) {
+        body.innerHTML = `<tr><td colspan="8" class="empty-state">${Fulfil.esc(Fulfil.errorText(err))}</td></tr>`;
+      }
+    }
+
+    document.getElementById('btnHistFilter').addEventListener('click', loadHistory);
+
+    loadStock();
+  </script>
+</body>
+</html>

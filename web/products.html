@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Товары — Fulfil</title>
+  <link rel="stylesheet" href="/css/theme.css" />
+  <script src="/js/core.js"></script>
+  <style>
+    .toolbar { display: flex; gap: 8px; flex-wrap: wrap; }
+    .search-row { display: flex; gap: 12px; align-items: center; margin-bottom: 18px; flex-wrap: wrap; }
+    .search-row .search-field { flex: 1 1 320px; }
+    .archived-toggle { font-size: 13px; color: var(--text-2); display: flex; align-items: center; gap: 6px; }
+    .manual-mark { font-size: 10px; color: var(--orange); border: 1px solid currentColor; border-radius: 3px; padding: 0 3px; margin-left: 4px; }
+    .archived-row { opacity: .55; }
+    .product-name { font-size: 14px; line-height: 1.2; color: var(--text); }
+    .product-meta .mono { font-family: var(--mono); }
+    .card-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+    .modal { width: 420px; max-height: 85vh; }
+    .field-row { display: flex; gap: 8px; align-items: center; }
+    .field-row > input, .field-row > select { flex: 1; }
+    .field-label { font-size: 12px; color: var(--muted); display: flex; justify-content: space-between; margin-bottom: 4px; }
+    .revert-link { cursor: pointer; color: var(--blue); font-size: 11px; }
+  </style>
+</head>
+<body>
+  <div class="page-head">
+    <h1 class="page-title">Товары</h1>
+    <div class="toolbar">
+      <button class="btn" id="btnNewProduct">+ Товар</button>
+      <button class="btn btn-primary" id="btnSync">Синхронизировать с WB</button>
+    </div>
+  </div>
+
+  <div class="search-row">
+    <div class="search-field">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="11" cy="11" r="8" /><path d="m21 21-4.3-4.3" />
+      </svg>
+      <input class="input" id="search" placeholder="Поиск по товару, артикулу или штрихкоду" />
+    </div>
+    <label class="archived-toggle">
+      <input type="checkbox" id="showArchived" /> показать архивные
+    </label>
+  </div>
+
+  <div id="body">Загрузка…</div>
+
+  <div class="modal-overlay" id="editModal">
+    <div class="modal" id="editModalBody"></div>
+  </div>
+
+  <div class="modal-overlay" id="newModal">
+    <form class="modal" id="newForm">
+      <h2>Новый товар</h2>
+      <div class="field-row"><input class="input" id="newBarcode" placeholder="Баркод (GTIN или LDX-XXXXXX)" required /></div>
+      <div class="field-row"><input class="input" id="newName" placeholder="Название" required /></div>
+      <div class="field-row"><input class="input" id="newBrand" placeholder="Бренд" /></div>
+      <div class="field-row">
+        <input class="input" id="newSize" placeholder="Размер" />
+        <input class="input" id="newColor" placeholder="Цвет" />
+      </div>
+      <div class="field-row">
+        <button type="button" class="btn" onclick="document.getElementById('newModal').classList.remove('open')">Отмена</button>
+        <button type="submit" class="btn btn-primary">Создать</button>
+      </div>
+    </form>
+  </div>
+
+  <script src="/js/sidebar.js"></script>
+  <script>
+    let currentSearch = '';
+    let showArchived = false;
+
+    async function load() {
+      const body = document.getElementById('body');
+      try {
+        const q = new URLSearchParams();
+        if (currentSearch) q.set('search', currentSearch);
+        if (showArchived) q.set('include_archived', 'true');
+        const items = await Fulfil.api('GET', '/products?' + q.toString());
+        if (!items.length) {
+          body.innerHTML = '<div class="empty-state">Товаров пока нет</div>';
+          return;
+        }
+        body.innerHTML = items
+          .map((p) => {
+            const manual = new Set(p.manualFields || []);
+            const mark = (field) => (manual.has(field) ? '<span class="manual-mark" title="Изменено вручную">✎</span>' : '');
+
+            // Колонки таблицы сложены в одну мета-строку карточки (макет /goods).
+            // Поле показывается, если есть значение или пометка ручной правки.
+            const meta = [];
+            meta.push(
+              p.barcode && !p.barcode.startsWith('TEMP')
+                ? `<span class="mono">${Fulfil.esc(p.barcode)}</span>${mark('barcode')}`
+                : `<i>ШК не задан</i>${mark('barcode')}`
+            );
+            const field = (value, ...marks) => {
+              const m = marks.map(mark).join('');
+              const v = Fulfil.esc(value || '');
+              if (v || m) meta.push((v || '—') + m);
+            };
+            field(p.vendorCode, 'vendor_code');
+            field(p.brand, 'brand');
+            field([p.size, p.color].filter(Boolean).join(' / '), 'size', 'color');
+
+            const actions = p.archivedAt
+              ? `<button class="btn btn-restore" data-id="${p.id}">Восстановить</button>`
+              : `<button class="btn btn-edit" data-id="${p.id}">Изменить</button>
+                 <button class="btn btn-danger btn-delete" data-id="${p.id}">Удалить</button>
+                 ${p.wbNmId ? '' : `<button class="btn btn-gen" data-id="${p.id}">Внутренний ШК</button>`}`;
+
+            return `
+          <div class="list-card ${p.archivedAt ? 'archived-row' : ''}" data-id="${p.id}">
+            <div class="product-name">${Fulfil.esc(p.name)}${mark('name')}${p.archivedAt ? ' <span class="badge badge-muted">архив</span>' : ''}</div>
+            <div class="list-card__meta product-meta">${meta.join(' · ')}</div>
+            <div class="card-actions">${actions}</div>
+          </div>`;
+          })
+          .join('');
+
+        document.querySelectorAll('.btn-gen').forEach((btn) =>
+          btn.addEventListener('click', async () => {
+            try {
+              await Fulfil.api('POST', `/products/${btn.dataset.id}/generate-internal-barcode`);
+              load();
+            } catch (err) {
+              Fulfil.toast(Fulfil.errorText(err), 'error');
+            }
+          })
+        );
+        document.querySelectorAll('.btn-edit').forEach((btn) =>
+          btn.addEventListener('click', () => openEditModal(btn.dataset.id))
+        );
+        document.querySelectorAll('.btn-delete').forEach((btn) =>
+          btn.addEventListener('click', () => deleteProduct(btn.dataset.id))
+        );
+        document.querySelectorAll('.btn-restore').forEach((btn) =>
+          btn.addEventListener('click', async () => {
+            try {
+              await Fulfil.api('POST', `/products/${btn.dataset.id}/restore`);
+              Fulfil.toast('Товар восстановлен');
+              load();
+            } catch (err) {
+              Fulfil.toast(Fulfil.errorText(err), 'error');
+            }
+          })
+        );
+      } catch (err) {
+        body.innerHTML = `<div class="empty-state">${Fulfil.esc(Fulfil.errorText(err))}</div>`;
+      }
+    }
+
+    async function deleteProduct(id) {
+      if (!confirm('Удалить товар?')) return;
+      try {
+        const res = await Fulfil.api('DELETE', `/products/${id}`);
+        Fulfil.toast(res.outcome === 'archived' ? 'Товар архивирован (есть история)' : 'Товар удалён');
+        load();
+      } catch (err) {
+        Fulfil.toast(Fulfil.errorText(err), 'error');
+      }
+    }
+
+    function fieldRow(label, id, value, fieldName, manual) {
+      const isManual = manual.has(fieldName);
+      return `
+        <div>
+          <div class="field-label">
+            <span>${label}</span>
+            ${isManual ? `<span class="revert-link" data-revert="${fieldName}">вернуть значение WB</span>` : ''}
+          </div>
+          <input class="input" id="${id}" value="${Fulfil.esc(value || '')}" />
+        </div>`;
+    }
+
+    async function openEditModal(id) {
+      const overlay = document.getElementById('editModal');
+      const body = document.getElementById('editModalBody');
+      body.innerHTML = 'Загрузка…';
+      overlay.classList.add('open');
+      try {
+        const p = await Fulfil.api('GET', `/products/${id}`);
+        const manual = new Set(p.manualFields || []);
+        body.innerHTML = `
+          <h2>Изменить товар</h2>
+          ${fieldRow('Название', 'editName', p.name, 'name', manual)}
+          ${fieldRow('Бренд', 'editBrand', p.brand, 'brand', manual)}
+          ${fieldRow('Размер', 'editSize', p.size, 'size', manual)}
+          ${fieldRow('Цвет', 'editColor', p.color, 'color', manual)}
+          ${fieldRow('Артикул', 'editVendorCode', p.vendorCode, 'vendor_code', manual)}
+          <div>
+            <div class="field-label">
+              <span>Баркод ${p.wbNmId ? '(нельзя менять — товар из WB)' : ''}</span>
+              ${manual.has('barcode') ? `<span class="revert-link" data-revert="barcode">вернуть значение WB</span>` : ''}
+            </div>
+            <input class="input" id="editBarcode" value="${Fulfil.esc(p.barcode)}" ${p.wbNmId ? 'disabled' : ''} />
+          </div>
+          <div class="field-row" style="margin-top:8px;">
+            <button type="button" class="btn" id="editCancel">Отмена</button>
+            <button type="button" class="btn btn-primary" id="editSave">Сохранить</button>
+          </div>`;
+
+        document.getElementById('editCancel').addEventListener('click', () => overlay.classList.remove('open'));
+        document.querySelectorAll('[data-revert]').forEach((el) =>
+          el.addEventListener('click', async () => {
+            try {
+              await Fulfil.api('POST', `/products/${id}/revert-manual-field`, { field: el.dataset.revert });
+              Fulfil.toast('Значение будет восстановлено ближайшей синхронизацией с WB');
+              openEditModal(id);
+            } catch (err) {
+              Fulfil.toast(Fulfil.errorText(err), 'error');
+            }
+          })
+        );
+        document.getElementById('editSave').addEventListener('click', async () => {
+          const patch = {
+            name: document.getElementById('editName').value,
+            brand: document.getElementById('editBrand').value,
+            size: document.getElementById('editSize').value,
+            color: document.getElementById('editColor').value,
+            vendorCode: document.getElementById('editVendorCode').value,
+          };
+          if (!p.wbNmId) patch.barcode = document.getElementById('editBarcode').value;
+          try {
+            await Fulfil.api('PATCH', `/products/${id}`, patch);
+            Fulfil.toast('Товар изменён');
+            overlay.classList.remove('open');
+            load();
+          } catch (err) {
+            Fulfil.toast(Fulfil.errorText(err), 'error');
+          }
+        });
+      } catch (err) {
+        body.innerHTML = `<div class="empty-state">${Fulfil.esc(Fulfil.errorText(err))}</div>`;
+      }
+    }
+
+    document.getElementById('btnSync').addEventListener('click', async () => {
+      try {
+        const res = await Fulfil.api('POST', '/products/sync-from-wb');
+        Fulfil.toast(`Синхронизировано товаров: ${res.imported}`);
+        load();
+      } catch (err) {
+        Fulfil.toast(Fulfil.errorText(err), 'error');
+      }
+    });
+
+    document.getElementById('btnNewProduct').addEventListener('click', () => {
+      document.getElementById('newModal').classList.add('open');
+    });
+    document.getElementById('newForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      try {
+        await Fulfil.api('POST', '/products', {
+          barcode: document.getElementById('newBarcode').value,
+          name: document.getElementById('newName').value,
+          brand: document.getElementById('newBrand').value || null,
+          size: document.getElementById('newSize').value || null,
+          color: document.getElementById('newColor').value || null,
+        });
+        Fulfil.toast('Товар создан');
+        document.getElementById('newModal').classList.remove('open');
+        e.target.reset();
+        load();
+      } catch (err) {
+        Fulfil.toast(Fulfil.errorText(err), 'error');
+      }
+    });
+
+    document.getElementById('showArchived').addEventListener('change', (e) => {
+      showArchived = e.target.checked;
+      load();
+    });
+
+    let searchTimer;
+    document.getElementById('search').addEventListener('input', (e) => {
+      clearTimeout(searchTimer);
+      currentSearch = e.target.value;
+      searchTimer = setTimeout(load, 250);
+    });
+
+    load();
+  </script>
+</body>
+</html>

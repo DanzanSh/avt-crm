@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Приёмка — Fulfil</title>
+  <link rel="stylesheet" href="/css/theme.css" />
+  <script src="/js/core.js"></script>
+  <script src="/js/scan-layout.js"></script>
+  <script src="/js/scanner.js"></script>
+  <style>
+    .scan-panel { max-width: 480px; display: flex; flex-direction: column; gap: 12px; padding: 18px; margin-bottom: 18px; }
+    .step-hint { color: var(--muted); font-size: 12px; line-height: 1.2; }
+    .scan-input { font-family: var(--mono); font-size: 20px; text-align: center; }
+    .product-preview {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      padding: 10px;
+      font-size: 13px;
+      color: var(--text-2);
+      background: var(--bg2);
+      border-radius: var(--radius-sm);
+    }
+    .qty-row { display: flex; gap: 8px; align-items: center; }
+    .qty-row input { text-align: center; font-size: 20px; }
+    .log-panel { padding: 18px; }
+    .log-panel h2 { font-size: 15px; font-weight: 400; margin: 0 0 12px; }
+    .log-item {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 9px 0;
+      border-bottom: 1px solid var(--divider);
+      font-size: 13px;
+      color: var(--text-2);
+    }
+    .log-item:last-child { border-bottom: none; }
+    .scanner-note { font-size: 12px; color: var(--muted); line-height: 1.2; }
+  </style>
+</head>
+<body>
+  <div class="page-head"><h1 class="page-title">Приёмка товара</h1></div>
+
+  <div class="card scan-panel">
+    <div class="step-hint" id="stepHint">Сейчас нужно: отсканировать баркод товара</div>
+
+    <input
+      class="input scan-input"
+      id="scanInput"
+      data-scan
+      autofocus
+      placeholder="Скан или ручной ввод + Enter…"
+      autocomplete="off"
+    />
+    <div class="scanner-note">
+      Сканер работает независимо от фокуса на поле — можно сканировать, даже кликнув в другое место.
+    </div>
+
+    <div id="productPreview" style="display:none" class="product-preview">
+      <span id="productName"></span>
+      <span id="productBarcode" style="color:var(--muted); font-family:var(--mono)"></span>
+    </div>
+
+    <div id="qtyRow" class="qty-row" style="display:none">
+      <button class="btn" type="button" id="qtyMinus">−</button>
+      <input class="input" id="qtyInput" type="number" min="1" value="1" />
+      <button class="btn" type="button" id="qtyPlus">+</button>
+      <button class="btn btn-primary" type="button" id="qtyConfirm">Далее — скан ячейки</button>
+    </div>
+  </div>
+
+  <div class="card log-panel">
+    <h2>Последние операции</h2>
+    <div id="log"></div>
+  </div>
+
+  <script src="/js/sidebar.js"></script>
+  <script>
+    // Состояние приёмки не сбрасывается при ошибке — оператор может просто сканировать снова
+    // (см. DEV-PLAN.md, идиома mobile-putaway.html эталона). Классификация кода — на сервере
+    // (/scan/resolve), фронт больше не гадает по стадии, что он отсканировал
+    // (FEATURES-PLAN.md, дефект №3 — раньше скан неизвестного баркода брал products[0]).
+    let stage = 'product'; // 'product' | 'qty' | 'cell'
+    let pendingProduct = null;
+    let pendingQty = 1;
+    let placing = false; // защита от повторной обработки, пока идёт запрос
+
+    const input = document.getElementById('scanInput');
+    const hint = document.getElementById('stepHint');
+    const preview = document.getElementById('productPreview');
+    const qtyRow = document.getElementById('qtyRow');
+    const qtyInput = document.getElementById('qtyInput');
+    const log = document.getElementById('log');
+
+    function resetToProductStage() {
+      stage = 'product';
+      pendingProduct = null;
+      preview.style.display = 'none';
+      qtyRow.style.display = 'none';
+      hint.textContent = 'Сейчас нужно: отсканировать баркод товара';
+      input.value = '';
+    }
+
+    function logLine(text, ok) {
+      const div = document.createElement('div');
+      div.className = 'log-item';
+      div.innerHTML = `<span>${Fulfil.esc(text)}</span><span style="color:${ok ? 'var(--green)' : 'var(--red)'}">${ok ? '✓' : '✗'}</span>`;
+      log.prepend(div);
+    }
+
+    async function classify(code) {
+      try {
+        return await Fulfil.api('POST', '/scan/resolve', { code });
+      } catch (err) {
+        Scanner.beep('error');
+        Fulfil.toast(Fulfil.errorText(err), 'error');
+        logLine(Fulfil.errorText(err), false);
+        return null;
+      }
+    }
+
+    async function handleProductCode(code) {
+      const result = await classify(code);
+      if (!result) return;
+      if (result.kind !== 'product') {
+        Scanner.beep('error');
+        Fulfil.toast('Это код ячейки, а не товара — сначала отсканируйте товар.', 'error');
+        return;
+      }
+      Scanner.beep('ok');
+      pendingProduct = result.product;
+      document.getElementById('productName').textContent = pendingProduct.name;
+      document.getElementById('productBarcode').textContent = pendingProduct.barcode;
+      preview.style.display = 'flex';
+      qtyRow.style.display = 'flex';
+      qtyInput.value = 1;
+      qtyInput.focus();
+      qtyInput.select();
+      stage = 'qty';
+      hint.textContent = 'Укажите количество, затем отсканируйте ячейку';
+      input.value = '';
+    }
+
+    async function handleCellCode(code) {
+      if (placing) return; // повторный скан во время выполнения запроса — игнорируем
+      const result = await classify(code);
+      if (!result) return;
+      if (result.kind !== 'cell') {
+        Scanner.beep('error');
+        Fulfil.toast('Это код товара, а не ячейки — отсканируйте ячейку.', 'error');
+        return;
+      }
+
+      placing = true;
+      const idempotencyKey = Fulfil.newIdempotencyKey();
+      try {
+        const res = await Fulfil.api(
+          'POST',
+          '/receiving/place',
+          { productBarcode: pendingProduct.barcode, cellCode: result.cell.address, qty: pendingQty },
+          { 'X-Idempotency-Key': idempotencyKey }
+        );
+        Scanner.beep('ok');
+        Fulfil.toast(`${res.qty} шт «${res.productName}» → ${res.cellAddress}`);
+        logLine(`${res.productName} · ${res.qty} шт · ${res.cellAddress}`, true);
+        resetToProductStage();
+      } catch (err) {
+        Scanner.beep('error');
+        Fulfil.toast(Fulfil.errorText(err), 'error');
+        logLine(Fulfil.errorText(err), false);
+        input.value = '';
+        // ошибка не сбрасывает состояние — можно отсканировать другую ячейку
+      } finally {
+        placing = false;
+      }
+    }
+
+    async function handleCode(code) {
+      if (!code) return;
+      if (stage === 'product') await handleProductCode(code);
+      else await handleCellCode(code);
+    }
+
+    // Основной путь: сканер, независимо от того, куда сейчас смотрит фокус.
+    Scanner.onScan((code) => {
+      input.value = code;
+      handleCode(code.trim());
+    });
+
+    // Резервный путь: ручной ввод в поле + Enter (для медленного набора, который
+    // Scanner не распознаёт как сканер и не перехватывает).
+    input.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter') return;
+      const code = input.value.trim();
+      if (!code) return;
+      handleCode(code);
+    });
+
+    document.getElementById('qtyMinus').addEventListener('click', () => {
+      qtyInput.value = Math.max(1, Number(qtyInput.value) - 1);
+    });
+    document.getElementById('qtyPlus').addEventListener('click', () => {
+      qtyInput.value = Number(qtyInput.value) + 1;
+    });
+    document.getElementById('qtyConfirm').addEventListener('click', () => {
+      pendingQty = Number(qtyInput.value) || 1;
+      stage = 'cell';
+      hint.textContent = `Отсканируйте ячейку для ${pendingQty} шт`;
+      input.focus();
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,197 @@
+import pytest
+
+from fulfil.errors import CellsNotReleasableError, NotFoundError, ZoneCodeNotLatinError
+from fulfil.models.storage import CellStatus
+from fulfil.services.receiving import place_stock
+from fulfil.services.storage import (
+    MAX_CELLS_PER_GENERATE,
+    create_zone,
+    delete_cell,
+    delete_rack,
+    delete_zone,
+    format_address,
+    format_cell_barcode,
+    generate_cells,
+    get_cell_map,
+    list_zones,
+    parse_address,
+    rename_zone,
+    resolve_location,
+    validate_zone_code_latin,
+)
+
+
+def _make_product(db, barcode="2000000000017", name="Майка белая"):
+    from fulfil.models.product import Product
+
+    p = Product(barcode=barcode, name=name)
+    db.add(p)
+    db.commit()
+    db.refresh(p)
+    return p
+
+
+def test_parse_address_roundtrip():
+    zone, rack, cell = parse_address("A-1-10")
+    assert (zone, rack, cell) == ("A", 1, 10)
+    assert format_address(zone, rack, cell) == "A-1-10"
+
+
+def test_parse_address_normalizes_cyrillic_homoglyphs():
+    """Оператор в русской раскладке сканирует «А-1-10» кириллицей — зона всё равно
+    латинская 'A' (Scope IN п.1)."""
+    zone, rack, cell = parse_address("А-1-10")
+    assert (zone, rack, cell) == ("A", 1, 10)
+
+
+def test_parse_address_rejects_garbage():
+    with pytest.raises(NotFoundError):
+        parse_address("not-an-address")
+
+
+def test_validate_zone_code_latin_accepts_latin():
+    assert validate_zone_code_latin("a") == "A"
+    assert validate_zone_code_latin("B1") == "B1"
+
+
+def test_validate_zone_code_latin_rejects_cyrillic_with_suggestion():
+    with pytest.raises(ZoneCodeNotLatinError) as exc_info:
+        validate_zone_code_latin("А")  # кириллическая А
+    assert exc_info.value.extra["suggestion"] == "A"
+
+
+def test_generate_cells_creates_expected_count(db):
+    cells = generate_cells(db, "A", racks=2, cells_per_rack=3)
+    assert len(cells) == 6
+    addresses = sorted(c.address for c in cells)
+    assert addresses == [
+        "A-1-1",
+        "A-1-2",
+        "A-1-3",
+        "A-2-1",
+        "A-2-2",
+        "A-2-3",
+    ]
+
+
+def test_generate_cells_is_additive_not_duplicating(db):
+    generate_cells(db, "A", racks=1, cells_per_rack=2)
+    second = generate_cells(db, "A", racks=1, cells_per_rack=3)
+    # первые 2 ячейки уже существовали — создаётся только недостающая третья
+    assert len(second) == 1
+    assert second[0].address == "A-1-3"
+
+
+def test_generate_cells_enforces_limit(db):
+    with pytest.raises(NotFoundError):
+        generate_cells(db, "A", racks=10, cells_per_rack=MAX_CELLS_PER_GENERATE)
+
+
+def test_generate_cells_rejects_cyrillic_zone(db):
+    with pytest.raises(ZoneCodeNotLatinError):
+        generate_cells(db, "А", racks=1, cells_per_rack=1)
+
+
+def test_cell_barcode_format():
+    assert format_cell_barcode(123) == "CELL-000123"
+
+
+def test_resolve_location_by_barcode_or_address(db):
+    [cell] = generate_cells(db, "A", racks=1, cells_per_rack=1)
+
+    assert resolve_location(db, cell.barcode).id == cell.id
+    assert resolve_location(db, cell.address).id == cell.id
+    assert resolve_location(db, cell.address.lower()).id == cell.id  # раскладка/регистр
+    assert resolve_location(db, str(cell.id)).id == cell.id
+
+
+def test_resolve_location_accepts_cyrillic_homoglyph_address(db):
+    [cell] = generate_cells(db, "A", racks=1, cells_per_rack=1)
+    assert resolve_location(db, "А-1-1").id == cell.id  # 'А' кириллическая
+
+
+def test_resolve_location_not_found(db):
+    with pytest.raises(NotFoundError):
+        resolve_location(db, "CELL-999999")
+
+
+def test_create_zone_new_zone_is_last_by_position(db):
+    create_zone(db, "A", None, actor="tester")
+    create_zone(db, "B", None, actor="tester")
+    zones = list_zones(db)
+    assert [z.code for z in zones] == ["A", "B"]
+
+
+def test_create_zone_duplicate_rejected(db):
+    from fulfil.errors import AppError
+
+    create_zone(db, "A", None, actor="tester")
+    with pytest.raises(AppError):
+        create_zone(db, "A", None, actor="tester")
+
+
+def test_cell_map_shows_empty_zone(db):
+    """Дефект №6: карта строится от зон, не от ячеек — пустая зона видна сразу
+    после создания (FEATURES-PLAN.md, этап 1)."""
+    create_zone(db, "A", None, actor="tester")
+    data = get_cell_map(db)
+    assert data["zones"][0]["code"] == "A"
+    assert data["zones"][0]["racks"] == []
+
+
+def test_delete_zone_blocked_when_cell_occupied(db):
+    product = _make_product(db)
+    [cell] = generate_cells(db, "A", racks=1, cells_per_rack=1)
+    place_stock(db, product, cell, 5)
+    zone = list_zones(db)[0]
+
+    with pytest.raises(CellsNotReleasableError) as exc_info:
+        delete_zone(db, zone, actor="tester")
+    assert exc_info.value.extra["blockingCells"][0]["address"] == "A-1-1"
+
+
+def test_delete_zone_cascades_when_empty(db):
+    generate_cells(db, "A", racks=1, cells_per_rack=2)
+    zone = list_zones(db)[0]
+    delete_zone(db, zone, actor="tester")
+
+    assert list_zones(db) == []
+    with pytest.raises(NotFoundError):
+        resolve_location(db, "A-1-1")
+
+
+def test_delete_rack_blocked_when_cell_blocked(db):
+    from fulfil.services.storage import block_cell
+
+    [cell] = generate_cells(db, "A", racks=1, cells_per_rack=1)
+    block_cell(db, cell, "залив")
+    rack = cell.rack
+
+    with pytest.raises(CellsNotReleasableError):
+        delete_rack(db, rack, actor="tester")
+
+
+def test_delete_cell_ok_when_free(db):
+    [cell] = generate_cells(db, "A", racks=1, cells_per_rack=1)
+    delete_cell(db, cell, actor="tester")
+    with pytest.raises(NotFoundError):
+        resolve_location(db, cell.address)
+
+
+def test_rename_zone_rewrites_cell_addresses(db):
+    generate_cells(db, "A", racks=1, cells_per_rack=2)
+    zone = list_zones(db)[0]
+    rename_zone(db, zone, "Z", None, actor="tester")
+
+    cell = resolve_location(db, "Z-1-1")
+    assert cell.address == "Z-1-1"
+    assert cell.zone_code == "Z"
+
+
+def test_generate_cells_after_delete_reuses_address(db):
+    """Частичный уникальный индекс: после мягкого удаления адрес можно занять заново."""
+    [cell] = generate_cells(db, "A", racks=1, cells_per_rack=1)
+    delete_cell(db, cell, actor="tester")
+    [new_cell] = generate_cells(db, "A", racks=1, cells_per_rack=1)
+    assert new_cell.address == "A-1-1"
+    assert new_cell.id != cell.id

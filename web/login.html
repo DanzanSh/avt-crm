@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Вход — Fulfil</title>
+  <link rel="stylesheet" href="/css/theme.css" />
+  <script src="/js/core.js"></script>
+  <style>
+    body { display: flex; align-items: center; justify-content: center; min-height: 100vh; padding: 16px; }
+    .login-card { width: 320px; max-width: 100%; padding: 28px; display: flex; flex-direction: column; gap: 12px; }
+    .login-brand { display: flex; align-items: center; gap: 9px; margin-bottom: 8px; }
+    .login-mark {
+      width: 28px; height: 28px; flex: none; border-radius: 8px;
+      background: rgba(53, 96, 189, 0.8); color: #fff;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .login-card h1 { font-size: 16px; line-height: 1.1; font-weight: 400; margin: 0; }
+    .login-card .btn { justify-content: center; margin-top: 4px; }
+  </style>
+</head>
+<body>
+  <form class="card login-card" id="loginForm">
+    <div class="login-brand">
+      <span class="login-mark">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z" />
+          <path d="m3.3 7 8.7 5 8.7-5" /><path d="M12 22V12" />
+        </svg>
+      </span>
+      <h1>Fulfil CRM</h1>
+    </div>
+    <input class="input" id="login" placeholder="Логин" autocomplete="username" />
+    <input class="input" id="password" type="password" placeholder="Пароль" autocomplete="current-password" />
+    <button class="btn btn-primary" type="submit">Войти</button>
+  </form>
+  <script>
+    document.getElementById('loginForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      try {
+        const resp = await fetch('/api/v1/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            login: document.getElementById('login').value,
+            password: document.getElementById('password').value,
+          }),
+        });
+        if (!resp.ok) {
+          Fulfil.toast('Неверный логин или пароль', 'error');
+          return;
+        }
+        const data = await resp.json();
+        Fulfil.setToken(data.accessToken);
+        location.href = '/stock.html';
+      } catch (err) {
+        Fulfil.toast('Ошибка сети', 'error');
+      }
+    });
+  </script>
+</body>
+</html>

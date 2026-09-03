@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Сборка заказа — Fulfil</title>
+  <link rel="stylesheet" href="/css/theme.css" />
+  <script src="/js/core.js"></script>
+  <script src="/js/scan-layout.js"></script>
+  <style>
+    .page-sub { color: var(--muted); font-size: 12px; line-height: 1.2; margin: -12px 0 20px; }
+    .pick-line {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      font-size: 13px;
+      color: var(--text-2);
+      padding: 9px 0;
+      border-bottom: 1px solid var(--divider);
+    }
+    .pick-line:last-child { border-bottom: none; }
+    .pick-line .addr { font-family: var(--mono); }
+    .sticker-box { text-align: center; }
+    .sticker-box img { max-width: 220px; border: 1px solid var(--border); border-radius: var(--radius-sm); }
+    .mark-row { display: flex; gap: 8px; flex-wrap: wrap; }
+    .mark-row .input { width: auto; flex: 1 1 200px; }
+    .mark-list { font-family: var(--mono); font-size: 12px; color: var(--muted); margin-top: 10px; }
+    .section { padding: 18px; margin-bottom: 18px; }
+    .section h2 { font-size: 15px; font-weight: 400; margin: 0 0 12px; }
+    #btnConfirm { width: 100%; justify-content: center; padding: 12px 16px; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <div class="page-head" style="margin-bottom:12px">
+    <h1 class="page-title">Сборка заказа <span id="orderIdLabel"></span></h1>
+  </div>
+  <div class="page-sub">Соберите товар по маршруту, отсканируйте марки «Честный знак», подтвердите сборку.</div>
+
+  <div class="card section">
+    <h2>Лист подбора (по маршруту)</h2>
+    <div id="pickList">Загрузка…</div>
+  </div>
+
+  <div class="card section sticker-box">
+    <h2>Этикетка заказа</h2>
+    <div id="stickerBox">
+      <button class="btn" id="btnSticker">Получить и напечатать</button>
+    </div>
+  </div>
+
+  <div class="card section">
+    <h2>Код маркировки «Честный знак»</h2>
+    <div class="mark-row">
+      <select class="input" id="itemSelect" style="max-width:260px"></select>
+      <input class="input" id="markInput" data-scan placeholder="Скан кода…" style="font-family:var(--mono)" />
+    </div>
+    <div class="mark-list" id="markList"></div>
+  </div>
+
+  <button class="btn btn-primary" id="btnConfirm">Подтвердить сборку</button>
+
+  <script src="/js/sidebar.js"></script>
+  <script>
+    const params = new URLSearchParams(location.search);
+    const orderId = params.get('orderId');
+    document.getElementById('orderIdLabel').textContent = orderId ? '#' + orderId : '';
+
+    let order = null;
+
+    async function loadOrder() {
+      order = await Fulfil.api('GET', `/fbs/orders/${orderId}`);
+      const sel = document.getElementById('itemSelect');
+      sel.innerHTML = order.items
+        .map((it) => `<option value="${it.id}">${Fulfil.esc(it.barcode)} × ${it.qty}</option>`)
+        .join('');
+    }
+
+    async function loadPickList() {
+      const el = document.getElementById('pickList');
+      try {
+        const lines = await Fulfil.api('GET', `/fbs/orders/${orderId}/pick-list`);
+        el.innerHTML = lines
+          .map(
+            (l) => `
+          <div class="pick-line">
+            <span>${l.seq}. ${Fulfil.esc(l.productName)}</span>
+            <span class="addr">${Fulfil.esc(l.cellAddress)} · ${l.qty} шт</span>
+          </div>`
+          )
+          .join('') || '<div class="empty-state">Пусто</div>';
+      } catch (err) {
+        el.innerHTML = `<div class="empty-state">${Fulfil.esc(Fulfil.errorText(err))}</div>`;
+      }
+    }
+
+    document.getElementById('btnSticker').addEventListener('click', async () => {
+      try {
+        const sticker = await Fulfil.api('GET', `/fbs/orders/${orderId}/sticker`);
+        const box = document.getElementById('stickerBox');
+        box.innerHTML = `<img src="data:image/${sticker.type};base64,${sticker.data}" alt="Этикетка заказа" />
+          <div style="margin-top:8px"><button class="btn" onclick="window.print()">Печать</button></div>`;
+      } catch (err) {
+        Fulfil.toast(Fulfil.errorText(err), 'error');
+      }
+    });
+
+    const scannedCodes = [];
+    document.getElementById('markInput').addEventListener('keydown', async (e) => {
+      if (e.key !== 'Enter') return;
+      const code = e.target.value;
+      if (!code) return;
+      const itemId = document.getElementById('itemSelect').value;
+      try {
+        await Fulfil.api('POST', `/fbs/orders/${orderId}/items/${itemId}/scan-mark`, { code });
+        scannedCodes.push(code);
+        document.getElementById('markList').textContent = `Отсканировано кодов: ${scannedCodes.length}`;
+        Fulfil.toast('Код принят');
+      } catch (err) {
+        // Молчание — не «да»: любая ошибка (включая сеть) требует пересканировать.
+        Fulfil.toast(Fulfil.errorText(err), 'error');
+      }
+      e.target.value = '';
+    });
+
+    document.getElementById('btnConfirm').addEventListener('click', async () => {
+      try {
+        await Fulfil.api('POST', `/fbs/orders/${orderId}/confirm-assembly`);
+        Fulfil.toast('Сборка подтверждена, остаток списан');
+        setTimeout(() => (location.href = '/fbs/orders.html'), 800);
+      } catch (err) {
+        Fulfil.toast(Fulfil.errorText(err), 'error');
+      }
+    });
+
+    loadOrder();
+    loadPickList();
+  </script>
+</body>
+</html>

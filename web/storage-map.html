@@ -1,0 +1,572 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Карта склада — Fulfil</title>
+  <link rel="stylesheet" href="/css/theme.css" />
+  <script src="/js/core.js"></script>
+  <script src="/js/scan-layout.js"></script>
+  <style>
+    .toolbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+
+    /* Карточка зоны из макета: синяя заливка, радиус 12, падинг 18. */
+    .zone-block {
+      background: rgba(53, 96, 189, 0.5);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 18px;
+      margin-bottom: 20px;
+    }
+    .zone-title-row { display: flex; align-items: center; gap: 6px; margin: 0 0 12px; }
+    .zone-title { font-family: var(--font-ui); font-weight: 700; font-size: 14px; color: var(--text); margin: 0; }
+    /* Разделитель «·» из макета — псевдоэлементом, чтобы не попадать в
+       textContent: renameZone() префилит промпт текстом .zone-title. */
+    .zone-title-row .link-action::before { content: '·'; margin-right: 6px; color: rgba(24, 34, 51, 0.55); }
+
+    .rack { display: flex; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; align-items: center; }
+    .rack:last-child { margin-bottom: 0; }
+    /* Подпись стеллажа — сама точка входа в меню, отдельных иконок нет. */
+    .rack-label {
+      width: 132px; flex: none; font-size: 12px; color: rgba(24, 34, 51, 0.7);
+      text-align: left; white-space: nowrap; padding: 2px 0;
+      background: none; border: none; font-family: var(--font); cursor: pointer;
+    }
+    .rack-label:hover, .rack-label:focus-visible { color: var(--text); text-decoration: underline; }
+    .cell-tile {
+      width: 44px; height: 30px; border-radius: var(--radius-xs); border: none;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 12px; font-weight: 700; letter-spacing: 0.02em;
+      color: var(--text); cursor: default; flex: none;
+    }
+    .cell-free { background: var(--cell-free); color: var(--text-2); }
+    .cell-occupied { background: var(--cell-occupied); color: #06301a; }
+    .cell-blocked { background: var(--cell-blocked); color: #fff; }
+    .cell-tile[title] { cursor: help; }
+
+    .modal { max-height: 85vh; }
+    .field-row { display: flex; gap: 8px; }
+    .field-row > * { flex: 1; }
+    .dry-run-summary { font-size: 13px; color: var(--text-2); background: var(--bg2); border-radius: var(--radius-sm); padding: 10px; }
+    .dry-run-summary .blocking { color: var(--red); margin-top: 6px; }
+    .dry-run-summary ul { margin: 4px 0 0; padding-left: 18px; }
+  </style>
+</head>
+<body>
+  <div class="page-head">
+    <h1 class="page-title">Карта склада</h1>
+    <div class="toolbar">
+      <button class="btn" id="btnGenerate">+ Сгенерировать ячейки</button>
+      <button class="btn" id="btnPrint">🖨 Печать ШК ячеек</button>
+      <button class="btn-accent" id="btnNewZone">+ Зона</button>
+    </div>
+  </div>
+
+  <div id="map" class="empty-state">Загрузка…</div>
+
+  <div class="modal-overlay" id="newZoneModal">
+    <form class="modal" id="newZoneForm">
+      <h2>Новая зона</h2>
+      <div class="field-row">
+        <input class="input" id="newZoneCode" placeholder="Код (латиница, A / B1)" maxlength="2" required />
+      </div>
+      <div class="field-row">
+        <input class="input" id="newZoneName" placeholder="Название (необязательно)" />
+      </div>
+      <div class="field-row">
+        <button type="button" class="btn" onclick="document.getElementById('newZoneModal').classList.remove('open')">Отмена</button>
+        <button type="submit" class="btn btn-primary">Создать</button>
+      </div>
+    </form>
+  </div>
+
+  <div class="modal-overlay" id="generateModal">
+    <form class="modal" id="generateForm">
+      <h2>Генерация ячеек</h2>
+      <div class="field-row">
+        <input class="input" id="genZone" placeholder="Зона (A)" maxlength="2" required />
+      </div>
+      <div class="field-row">
+        <input class="input" id="genRacks" type="number" min="1" placeholder="Стеллажей" required />
+        <input class="input" id="genCells" type="number" min="1" placeholder="Ячеек на стеллаж" required />
+      </div>
+      <div class="field-row">
+        <button type="button" class="btn" onclick="document.getElementById('generateModal').classList.remove('open')">Отмена</button>
+        <button type="submit" class="btn btn-primary">Создать</button>
+      </div>
+    </form>
+  </div>
+
+  <div class="modal-overlay" id="printModal">
+    <form class="modal" id="printForm">
+      <h2>Печать ШК ячеек</h2>
+      <div class="field-row">
+        <select class="input" id="printFilter">
+          <option value="all">Все ячейки</option>
+          <option value="zone">По зоне</option>
+        </select>
+        <input class="input" id="printZone" placeholder="Зона (если по зоне)" maxlength="2" />
+      </div>
+      <div class="field-row">
+        <select class="input" id="printSize">
+          <option value="58x40">58×40 мм</option>
+          <option value="120x75">120×75 мм</option>
+        </select>
+      </div>
+      <div class="field-row">
+        <button type="button" class="btn" onclick="document.getElementById('printModal').classList.remove('open')">Отмена</button>
+        <button type="submit" class="btn btn-primary">Скачать PDF</button>
+      </div>
+    </form>
+  </div>
+
+  <!-- Общая модалка предпросмотра ресайза (dry_run) — переиспользуется для зоны и стеллажа. -->
+  <div class="modal-overlay" id="resizeModal">
+    <div class="modal" id="resizeModalBody"></div>
+  </div>
+
+  <div class="modal-overlay" id="detailModal">
+    <div class="modal" id="detailModalBody"></div>
+  </div>
+
+  <!-- Меню действий живёт вне #map: loadMap() перерисовывает #map целиком. -->
+  <div class="menu" id="actionMenu" role="menu" hidden></div>
+
+  <script src="/js/sidebar.js"></script>
+  <script>
+    let lastCreatedZoneCode = null;
+
+    // ── Меню действий ──────────────────────────────────────────────
+    // Одна точка входа вместо россыпи иконок: ссылка «Изменить» у зоны и
+    // подпись стеллажа. Сами действия (renameZone и пр.) не меняются.
+
+    const actionMenu = document.getElementById('actionMenu');
+    let menuAnchor = null;
+
+    function closeMenu() {
+      actionMenu.hidden = true;
+      actionMenu.innerHTML = '';
+      menuAnchor = null;
+    }
+
+    function openMenu(anchor, items) {
+      const reopening = menuAnchor === anchor;
+      closeMenu();
+      if (reopening) return; // повторный клик по той же кнопке — закрыть
+
+      items.forEach((item) => {
+        if (item.sep) {
+          actionMenu.appendChild(Object.assign(document.createElement('div'), { className: 'menu-sep' }));
+          return;
+        }
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'menu-item' + (item.danger ? ' menu-item--danger' : '');
+        btn.setAttribute('role', 'menuitem');
+        btn.textContent = item.label;
+        btn.addEventListener('click', () => {
+          closeMenu();
+          item.onClick();
+        });
+        actionMenu.appendChild(btn);
+      });
+
+      menuAnchor = anchor;
+      actionMenu.hidden = false;
+
+      // Позиционирование под якорем с прижатием к вьюпорту.
+      const a = anchor.getBoundingClientRect();
+      const m = actionMenu.getBoundingClientRect();
+      const gap = 6;
+      let top = a.bottom + gap;
+      if (top + m.height > window.innerHeight - 8) top = Math.max(8, a.top - gap - m.height);
+      let left = a.left;
+      if (left + m.width > window.innerWidth - 8) left = Math.max(8, window.innerWidth - 8 - m.width);
+      actionMenu.style.top = top + 'px';
+      actionMenu.style.left = left + 'px';
+      // preventScroll: иначе focus() может прокрутить страницу и сам же
+      // закрыть меню через обработчик scroll ниже.
+      const first = actionMenu.querySelector('.menu-item');
+      if (first) first.focus({ preventScroll: true });
+    }
+
+    document.addEventListener('click', (e) => {
+      if (actionMenu.hidden) return;
+      if (actionMenu.contains(e.target) || e.target.closest('[data-menu]')) return;
+      closeMenu();
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') closeMenu();
+    });
+    window.addEventListener('scroll', closeMenu, true);
+    window.addEventListener('resize', closeMenu);
+
+    async function loadMap() {
+      closeMenu();
+      const el = document.getElementById('map');
+      try {
+        const data = await Fulfil.api('GET', '/storage/cell-map');
+        if (!data.zones.length) {
+          el.className = 'empty-state';
+          el.textContent = 'Зон пока нет — создайте зону или сгенерируйте ячейки.';
+          return;
+        }
+        el.className = '';
+        el.innerHTML = data.zones
+          .map(
+            (z) => `
+          <div class="zone-block" data-zone-id="${z.id}" id="zone-block-${z.id}">
+            <div class="zone-title-row">
+              <div class="zone-title">Зона ${Fulfil.esc(z.code)}${z.name ? ' — ' + Fulfil.esc(z.name) : ''}</div>
+              <button class="link-action" data-menu="zone" data-zone-id="${z.id}" aria-haspopup="menu">Изменить</button>
+            </div>
+            ${z.racks.length ? '' : '<div class="empty-state" style="padding:8px 0;">Стеллажей пока нет</div>'}
+            ${z.racks
+              .map(
+                (r) => `
+              <div class="rack">
+                <button class="rack-label" data-menu="rack" data-rack-id="${r.id}"
+                        aria-haspopup="menu" title="Действия со стеллажом">Стеллаж ${r.number}</button>
+                ${r.cells
+                  .map((c) => {
+                    const cls = c.status === 'blocked' ? 'cell-blocked' : c.status === 'occupied' ? 'cell-occupied' : 'cell-free';
+                    const title = `${c.address} · ${c.barcode} · ${c.status}${c.blockedReason ? ' · ' + c.blockedReason : ''}`;
+                    return `<div class="cell-tile ${cls}" data-cell-id="${c.id}" title="${Fulfil.esc(title)}">${c.cellNo}</div>`;
+                  })
+                  .join('')}
+              </div>`
+              )
+              .join('')}
+          </div>`
+          )
+          .join('');
+
+        el.querySelectorAll('.cell-tile').forEach((tile) =>
+          tile.addEventListener('click', () => openCellDetail(tile.dataset.cellId))
+        );
+        el.querySelectorAll('[data-menu="zone"]').forEach((btn) =>
+          btn.addEventListener('click', () => {
+            const id = btn.dataset.zoneId;
+            openMenu(btn, [
+              { label: 'Переименовать', onClick: () => renameZone(id) },
+              { label: 'Добавить стеллажи', onClick: () => addRacks(id) },
+              { label: 'Изменить размер', onClick: () => resizeZone(id) },
+              { sep: true },
+              { label: 'Удалить зону', danger: true, onClick: () => deleteZone(id) },
+            ]);
+          })
+        );
+        el.querySelectorAll('[data-menu="rack"]').forEach((btn) =>
+          btn.addEventListener('click', () => {
+            const id = btn.dataset.rackId;
+            openMenu(btn, [
+              { label: 'Изменить число ячеек', onClick: () => resizeRack(id) },
+              { sep: true },
+              { label: 'Удалить стеллаж', danger: true, onClick: () => deleteRack(id) },
+            ]);
+          })
+        );
+
+        // Новая зона отображается последней (Scope IN п.1) — прокручиваем к ней.
+        if (lastCreatedZoneCode) {
+          const created = data.zones.find((z) => z.code === lastCreatedZoneCode);
+          lastCreatedZoneCode = null;
+          if (created) {
+            const block = document.getElementById('zone-block-' + created.id);
+            if (block) block.scrollIntoView({ behavior: 'smooth', block: 'end' });
+          }
+        }
+      } catch (err) {
+        el.className = 'empty-state';
+        el.textContent = Fulfil.errorText(err);
+      }
+    }
+
+    async function renameZone(zoneId) {
+      const block = document.querySelector(`.zone-block[data-zone-id="${zoneId}"] .zone-title`);
+      const current = block ? block.textContent : '';
+      const newCode = prompt('Код зоны (латиница):', current.replace(/^Зона /, '').split(' — ')[0]);
+      if (newCode === null) return;
+      const newName = prompt('Название зоны (можно пусто):', '');
+      try {
+        await Fulfil.api('PATCH', `/storage/zones/${zoneId}`, { code: newCode || undefined, name: newName || null });
+        Fulfil.toast('Зона переименована');
+        loadMap();
+      } catch (err) {
+        Fulfil.toast(Fulfil.errorText(err), 'error');
+      }
+    }
+
+    async function addRacks(zoneId) {
+      const racks = Number(prompt('Сколько стеллажей добавить?', '1'));
+      if (!racks || racks <= 0) return;
+      const cellsPerRack = Number(prompt('Ячеек на новый стеллаж?', '10'));
+      if (!cellsPerRack || cellsPerRack <= 0) return;
+      try {
+        const res = await Fulfil.api('POST', `/storage/zones/${zoneId}/racks`, { racks, cellsPerRack });
+        Fulfil.toast(`Добавлено ячеек: ${res.created}`);
+        loadMap();
+      } catch (err) {
+        Fulfil.toast(Fulfil.errorText(err), 'error');
+      }
+    }
+
+    function renderDryRunSummary(plan) {
+      const blockingHtml = plan.blocking.length
+        ? `<div class="blocking">Мешают ${plan.blocking.length} ячеек: <ul>${plan.blocking
+            .map((b) => `<li>${Fulfil.esc(b.address)} — ${Fulfil.esc(b.status)}${b.qty ? `, ${b.qty} шт` : ''}</li>`)
+            .join('')}</ul></div>`
+        : '';
+      return `
+        <div class="dry-run-summary">
+          Будет создано ячеек: <b>${plan.toCreate}</b><br/>
+          Будет удалено ячеек: <b>${plan.toDelete.length}</b>${plan.toDelete.length ? ' (' + plan.toDelete.map(Fulfil.esc).join(', ') + ')' : ''}
+          ${blockingHtml}
+        </div>`;
+    }
+
+    async function resizeZone(zoneId) {
+      const racks = Number(prompt('Итоговое число стеллажей в зоне:', ''));
+      if (!racks || racks <= 0) return;
+      const cellsPerRack = Number(prompt('Ячеек на каждый стеллаж:', ''));
+      if (!cellsPerRack || cellsPerRack <= 0) return;
+
+      try {
+        const plan = await Fulfil.api('PATCH', `/storage/zones/${zoneId}?dry_run=true`, { racks, cellsPerRack });
+        openResizeConfirm(plan, async () => {
+          await Fulfil.api('PATCH', `/storage/zones/${zoneId}`, { racks, cellsPerRack });
+          Fulfil.toast('Размер зоны изменён');
+          loadMap();
+        });
+      } catch (err) {
+        Fulfil.toast(Fulfil.errorText(err), 'error');
+      }
+    }
+
+    async function resizeRack(rackId) {
+      const cellsCount = Number(prompt('Итоговое число ячеек в стеллаже:', ''));
+      if (!cellsCount || cellsCount <= 0) return;
+
+      try {
+        const plan = await Fulfil.api('PATCH', `/storage/racks/${rackId}?dry_run=true`, { cellsCount });
+        openResizeConfirm(plan, async () => {
+          await Fulfil.api('PATCH', `/storage/racks/${rackId}`, { cellsCount });
+          Fulfil.toast('Размер стеллажа изменён');
+          loadMap();
+        });
+      } catch (err) {
+        Fulfil.toast(Fulfil.errorText(err), 'error');
+      }
+    }
+
+    function openResizeConfirm(plan, onConfirm) {
+      const overlay = document.getElementById('resizeModal');
+      const body = document.getElementById('resizeModalBody');
+      const disabled = plan.blocking.length ? 'disabled' : '';
+      body.innerHTML = `
+        <h2>Подтвердите изменение</h2>
+        ${renderDryRunSummary(plan)}
+        <div class="field-row" style="margin-top:8px;">
+          <button type="button" class="btn" id="resizeCancel">Отмена</button>
+          <button type="button" class="btn btn-primary" id="resizeConfirm" ${disabled}>Применить</button>
+        </div>`;
+      overlay.classList.add('open');
+      document.getElementById('resizeCancel').addEventListener('click', () => overlay.classList.remove('open'));
+      const confirmBtn = document.getElementById('resizeConfirm');
+      if (!plan.blocking.length) {
+        confirmBtn.addEventListener('click', async () => {
+          overlay.classList.remove('open');
+          try {
+            await onConfirm();
+          } catch (err) {
+            Fulfil.toast(Fulfil.errorText(err), 'error');
+          }
+        });
+      }
+    }
+
+    async function deleteZone(zoneId) {
+      if (!confirm('Удалить зону целиком (все её стеллажи и ячейки)?')) return;
+      try {
+        await Fulfil.api('DELETE', `/storage/zones/${zoneId}`);
+        Fulfil.toast('Зона удалена');
+        loadMap();
+      } catch (err) {
+        Fulfil.toast(Fulfil.errorText(err), 'error');
+      }
+    }
+
+    async function deleteRack(rackId) {
+      if (!confirm('Удалить стеллаж целиком (все его ячейки)?')) return;
+      try {
+        await Fulfil.api('DELETE', `/storage/racks/${rackId}`);
+        Fulfil.toast('Стеллаж удалён');
+        loadMap();
+      } catch (err) {
+        Fulfil.toast(Fulfil.errorText(err), 'error');
+      }
+    }
+
+    async function openCellDetail(cellId) {
+      const overlay = document.getElementById('detailModal');
+      const body = document.getElementById('detailModalBody');
+      body.innerHTML = 'Загрузка…';
+      overlay.classList.add('open');
+      try {
+        const cell = await Fulfil.api('GET', `/storage/cells/${cellId}`);
+        renderCellDetail(cell);
+      } catch (err) {
+        body.innerHTML = `<div class="empty-state">${Fulfil.esc(Fulfil.errorText(err))}</div>`;
+      }
+    }
+
+    function renderCellDetail(cell) {
+      const body = document.getElementById('detailModalBody');
+      body.innerHTML = `
+        <h2>Ячейка ${Fulfil.esc(cell.address)}</h2>
+        <div style="font-family:var(--mono); color:var(--muted); margin-bottom:8px;">${Fulfil.esc(cell.barcode)}</div>
+        <div>Статус: <span class="badge ${cell.status === 'blocked' ? 'badge-red' : cell.status === 'occupied' ? 'badge-green' : 'badge-muted'}">${Fulfil.esc(cell.status)}</span></div>
+        <div style="margin-top:12px; font-weight:600;">Допустимые баркоды</div>
+        <div id="allowedList" style="font-family:var(--mono); font-size:12px; margin:6px 0;">
+          ${cell.allowedBarcodes.length ? cell.allowedBarcodes.map((b) => Fulfil.esc(b)).join(', ') : '<span style="color:var(--muted)">любой товар (допуск не настроен)</span>'}
+        </div>
+        <div class="field-row">
+          <input class="input" id="newAllowedBarcode" placeholder="Добавить баркод" />
+          <button class="btn" id="btnAddAllowed">Добавить</button>
+        </div>
+        <div class="field-row" style="margin-top:12px;">
+          ${
+            cell.status === 'blocked'
+              ? `<button class="btn" id="btnUnblock">Разблокировать</button>`
+              : `<button class="btn btn-danger" id="btnBlock">Заблокировать</button>`
+          }
+          <button class="btn btn-danger" id="btnDeleteCell">Удалить ячейку</button>
+        </div>
+        <div class="field-row">
+          <button class="btn" onclick="document.getElementById('detailModal').classList.remove('open')">Закрыть</button>
+        </div>
+      `;
+
+      document.getElementById('btnAddAllowed').addEventListener('click', async () => {
+        const barcode = document.getElementById('newAllowedBarcode').value.trim();
+        if (!barcode) return;
+        try {
+          await Fulfil.api('POST', `/storage/cells/${cell.id}/allowed-barcodes`, { barcode });
+          openCellDetail(cell.id);
+        } catch (err) {
+          Fulfil.toast(Fulfil.errorText(err), 'error');
+        }
+      });
+
+      const blockBtn = document.getElementById('btnBlock');
+      if (blockBtn) {
+        blockBtn.addEventListener('click', async () => {
+          const reason = prompt('Причина блокировки (обязательно):');
+          if (!reason) return;
+          try {
+            await Fulfil.api('POST', `/storage/cells/${cell.id}/block`, { reason });
+            document.getElementById('detailModal').classList.remove('open');
+            loadMap();
+          } catch (err) {
+            Fulfil.toast(Fulfil.errorText(err), 'error');
+          }
+        });
+      }
+      const unblockBtn = document.getElementById('btnUnblock');
+      if (unblockBtn) {
+        unblockBtn.addEventListener('click', async () => {
+          try {
+            await Fulfil.api('POST', `/storage/cells/${cell.id}/unblock`);
+            document.getElementById('detailModal').classList.remove('open');
+            loadMap();
+          } catch (err) {
+            Fulfil.toast(Fulfil.errorText(err), 'error');
+          }
+        });
+      }
+      document.getElementById('btnDeleteCell').addEventListener('click', async () => {
+        if (!confirm(`Удалить ячейку ${cell.address}?`)) return;
+        try {
+          await Fulfil.api('DELETE', `/storage/cells/${cell.id}`);
+          document.getElementById('detailModal').classList.remove('open');
+          Fulfil.toast('Ячейка удалена');
+          loadMap();
+        } catch (err) {
+          Fulfil.toast(Fulfil.errorText(err), 'error');
+        }
+      });
+    }
+
+    document.getElementById('btnNewZone').addEventListener('click', () => {
+      document.getElementById('newZoneModal').classList.add('open');
+    });
+    document.getElementById('btnGenerate').addEventListener('click', () => {
+      document.getElementById('generateModal').classList.add('open');
+    });
+    document.getElementById('btnPrint').addEventListener('click', () => {
+      document.getElementById('printModal').classList.add('open');
+    });
+
+    document.getElementById('newZoneForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const code = document.getElementById('newZoneCode').value;
+      try {
+        const zone = await Fulfil.api('POST', '/storage/zones', {
+          code,
+          name: document.getElementById('newZoneName').value || null,
+        });
+        Fulfil.toast(`Зона ${zone.code} создана`);
+        lastCreatedZoneCode = zone.code;
+        document.getElementById('newZoneModal').classList.remove('open');
+        e.target.reset();
+        loadMap();
+      } catch (err) {
+        Fulfil.toast(Fulfil.errorText(err), 'error');
+      }
+    });
+
+    document.getElementById('generateForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      try {
+        const res = await Fulfil.api('POST', '/storage/cells/generate', {
+          zoneCode: document.getElementById('genZone').value,
+          racks: Number(document.getElementById('genRacks').value),
+          cellsPerRack: Number(document.getElementById('genCells').value),
+        });
+        Fulfil.toast(`Создано ячеек: ${res.created}`);
+        lastCreatedZoneCode = document.getElementById('genZone').value.trim().toUpperCase();
+        document.getElementById('generateModal').classList.remove('open');
+        loadMap();
+      } catch (err) {
+        Fulfil.toast(Fulfil.errorText(err), 'error');
+      }
+    });
+
+    document.getElementById('printForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const filter = document.getElementById('printFilter').value;
+      const zoneCode = document.getElementById('printZone').value || undefined;
+      const size = document.getElementById('printSize').value;
+      try {
+        const resp = await fetch('/api/v1/storage/labels', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + Fulfil.getToken() },
+          body: JSON.stringify({ filter, zoneCode, size }),
+        });
+        if (!resp.ok) throw new Error('print failed');
+        const blob = await resp.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'cell-labels.pdf';
+        a.click();
+        document.getElementById('printModal').classList.remove('open');
+      } catch (err) {
+        Fulfil.toast('Не удалось напечатать этикетки', 'error');
+      }
+    });
+
+    loadMap();
+  </script>
+</body>
+</html>

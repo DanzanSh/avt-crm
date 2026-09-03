@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Заказы ФБС — Fulfil</title>
+  <link rel="stylesheet" href="/css/theme.css" />
+  <script src="/js/core.js"></script>
+  <style>
+    .order-id { font-family: var(--mono); font-size: 15px; color: var(--text); }
+    .card-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+  </style>
+</head>
+<body>
+  <div class="page-head">
+    <h1 class="page-title">Заказы ФБС</h1>
+    <button class="btn btn-primary" id="btnSync">Синхронизировать заказы</button>
+  </div>
+
+  <div id="body">Загрузка…</div>
+
+  <script src="/js/sidebar.js"></script>
+  <script>
+    const STATUS_LABELS = {
+      new: ['Новый', 'badge-blue'],
+      confirmed: ['Подтверждён', 'badge-blue'],
+      in_assembly: ['В сборке', 'badge-orange'],
+      packed: ['Собран', 'badge-green'],
+      in_supply: ['В поставке', 'badge-green'],
+      shipped: ['Отгружен', 'badge-muted'],
+      delivered: ['Доставлен', 'badge-muted'],
+      cancelled: ['Отменён', 'badge-red'],
+      expired: ['Просрочен', 'badge-red'],
+      rejected_no_stock: ['Нет остатка', 'badge-red'],
+    };
+
+    // «1 позиция / 2 позиции / 5 позиций» — в таблице был заголовок «Позиций»,
+    // в карточке число стоит рядом со словом и склонение видно.
+    function plural(n, one, few, many) {
+      const d10 = n % 10;
+      const d100 = n % 100;
+      if (d10 === 1 && d100 !== 11) return one;
+      if (d10 >= 2 && d10 <= 4 && (d100 < 12 || d100 > 14)) return few;
+      return many;
+    }
+
+    async function load() {
+      const body = document.getElementById('body');
+      try {
+        const orders = await Fulfil.api('GET', '/fbs/orders');
+        if (!orders.length) {
+          body.innerHTML = '<div class="empty-state">Заказов пока нет — синхронизируйте с WB.</div>';
+          return;
+        }
+        body.innerHTML = orders
+          .map((o) => {
+            const [label, cls] = STATUS_LABELS[o.status] || [o.status, 'badge-muted'];
+            const canTake = o.status === 'new';
+            const canAssemble = o.status === 'confirmed' || o.status === 'in_assembly';
+            const actions =
+              (canTake ? `<button class="btn btn-take" data-id="${o.id}">Взять в работу</button>` : '') +
+              (canAssemble ? `<a class="btn" href="/fbs/picking.html?orderId=${o.id}">Сборка</a>` : '');
+            return `
+          <div class="list-card">
+            <div class="order-id">${Fulfil.esc(o.wbOrderId)}</div>
+            <span class="badge ${cls}">${label}</span>
+            <div class="list-card__meta">${o.items.length} ${plural(o.items.length, 'позиция', 'позиции', 'позиций')}</div>
+            ${actions ? `<div class="card-actions">${actions}</div>` : ''}
+          </div>`;
+          })
+          .join('');
+
+        document.querySelectorAll('.btn-take').forEach((btn) =>
+          btn.addEventListener('click', () => takeToWork(btn.dataset.id))
+        );
+      } catch (err) {
+        body.innerHTML = `<div class="empty-state">${Fulfil.esc(Fulfil.errorText(err))}</div>`;
+      }
+    }
+
+    async function takeToWork(orderId) {
+      // «Взять в работу» необратимо на стороне WB — обязательное предупреждение перед вызовом.
+      const ok = confirm(
+        'Заказ будет подтверждён на Wildberries. Покупатель больше не сможет его отменить, ' +
+          'и обратной операции у WB нет. Продолжить?'
+      );
+      if (!ok) return;
+      try {
+        await Fulfil.api('POST', `/fbs/orders/${orderId}/take-to-work`);
+        Fulfil.toast('Заказ взят в работу');
+        load();
+      } catch (err) {
+        Fulfil.toast(Fulfil.errorText(err), 'error');
+      }
+    }
+
+    document.getElementById('btnSync').addEventListener('click', async () => {
+      try {
+        const res = await Fulfil.api('POST', '/fbs/orders/sync');
+        Fulfil.toast(`Новых заказов: ${res.created}`);
+        load();
+      } catch (err) {
+        Fulfil.toast(Fulfil.errorText(err), 'error');
+      }
+    });
+
+    load();
+  </script>
+</body>
+</html>

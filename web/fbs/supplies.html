@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Поставки — Fulfil</title>
+  <link rel="stylesheet" href="/css/theme.css" />
+  <script src="/js/core.js"></script>
+  <style>
+    .supply-id { font-family: var(--mono); font-size: 15px; color: var(--text); }
+    .supply-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+    .qr-area:empty { display: none; }
+    .qr-area { display: flex; gap: 8px; flex-wrap: wrap; }
+    .qr-img { max-width: 160px; border: 1px solid var(--border); border-radius: var(--radius-sm); }
+  </style>
+</head>
+<body>
+  <div class="page-head">
+    <h1 class="page-title">Поставки</h1>
+    <button class="btn btn-primary" id="btnCreate">+ Новая поставка</button>
+  </div>
+
+  <div id="list">Загрузка…</div>
+
+  <script src="/js/sidebar.js"></script>
+  <script>
+    const STATUS_LABELS = {
+      open: ['Открыта', 'badge-blue'],
+      closed: ['Закрыта', 'badge-green'],
+      partial: ['Частично', 'badge-orange'],
+      failed: ['Ошибка', 'badge-red'],
+      stale: ['Закрыта на стороне WB', 'badge-red'],
+    };
+
+    async function load() {
+      const list = document.getElementById('list');
+      try {
+        const supplies = await Fulfil.api('GET', '/fbs/supplies');
+        if (!supplies.length) {
+          list.innerHTML = '<div class="empty-state">Поставок пока нет</div>';
+          return;
+        }
+        list.innerHTML = supplies
+          .map((s) => {
+            const [label, cls] = STATUS_LABELS[s.status] || [s.status, 'badge-muted'];
+            const canClose = s.status === 'open';
+            const canQr = s.status === 'closed' || s.status === 'partial';
+            return `
+          <div class="list-card" data-id="${s.id}">
+            <div class="supply-id">${Fulfil.esc(s.wbSupplyId || '—')}</div>
+            <span class="badge ${cls}">${label}</span>
+            <div class="supply-actions">
+              ${canClose ? `<button class="btn btn-close" data-id="${s.id}">Закрыть поставку</button>` : ''}
+              ${canQr ? `<button class="btn btn-qr" data-id="${s.id}">QR поставки</button>` : ''}
+              ${canQr ? `<button class="btn btn-boxes" data-id="${s.id}">QR коробов</button>` : ''}
+            </div>
+            <div class="qr-area" id="qr-${s.id}"></div>
+          </div>`;
+          })
+          .join('');
+
+        document.querySelectorAll('.btn-close').forEach((b) => b.addEventListener('click', () => closeSupply(b.dataset.id)));
+        document.querySelectorAll('.btn-qr').forEach((b) => b.addEventListener('click', () => showQr(b.dataset.id)));
+        document.querySelectorAll('.btn-boxes').forEach((b) => b.addEventListener('click', () => showBoxes(b.dataset.id)));
+      } catch (err) {
+        list.innerHTML = `<div class="empty-state">${Fulfil.esc(Fulfil.errorText(err))}</div>`;
+      }
+    }
+
+    document.getElementById('btnCreate').addEventListener('click', async () => {
+      try {
+        await Fulfil.api('POST', '/fbs/supplies');
+        Fulfil.toast('Поставка создана');
+        load();
+      } catch (err) {
+        Fulfil.toast(Fulfil.errorText(err), 'error');
+      }
+    });
+
+    async function closeSupply(id) {
+      try {
+        await Fulfil.api('POST', `/fbs/supplies/${id}/close`);
+        Fulfil.toast('Поставка закрыта');
+        load();
+      } catch (err) {
+        Fulfil.toast(Fulfil.errorText(err), 'error');
+      }
+    }
+
+    async function showQr(id) {
+      const area = document.getElementById('qr-' + id);
+      try {
+        // QR поставки доступен только после закрытия — сервер сам это проверит (409, если рано).
+        const qr = await Fulfil.api('GET', `/fbs/supplies/${id}/qr`);
+        area.innerHTML = `<img class="qr-img" src="data:image/${qr.type};base64,${qr.data}" alt="QR поставки" />`;
+      } catch (err) {
+        Fulfil.toast(Fulfil.errorText(err), 'error');
+      }
+    }
+
+    async function showBoxes(id) {
+      const amountStr = prompt('Сколько коробов?', '1');
+      if (!amountStr) return;
+      const amount = Number(amountStr);
+      if (!amount || amount <= 0) return;
+      const area = document.getElementById('qr-' + id);
+      try {
+        const res = await Fulfil.api('POST', `/fbs/supplies/${id}/boxes`, { amount });
+        area.innerHTML = res.boxes
+          .map((b) => `<img class="qr-img" src="data:image/png;base64,${b.stickerData}" alt="QR короба" />`)
+          .join('');
+      } catch (err) {
+        Fulfil.toast(Fulfil.errorText(err), 'error');
+      }
+    }
+
+    load();
+  </script>
+</body>
+</html>
