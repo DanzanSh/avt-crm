@@ -1,26 +1,61 @@
+# Прод-развёртывание: app + PostgreSQL + Caddy (авто-TLS).
+# Запуск:  docker compose -f docker-compose.yml up -d --build
+#
+# Требует файл .env рядом (скопировать из .env.example и заполнить):
+#   DATABASE_URL=postgresql+psycopg://fulfil:<pass>@db:5432/fulfil
+#   POSTGRES_PASSWORD=<pass>              # тот же пароль, что в DATABASE_URL
+#   ADMIN_LOGIN=...
+#   ADMIN_PASSWORD=...
+#   JWT_SECRET=...                        # openssl rand -hex 32
+#   DOMAIN=crm.example.ru                 # домен для Caddy/Let's Encrypt
+
 services:
+  app:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    depends_on:
+      db:
+        condition: service_healthy
+    # Миграции прогоняем перед стартом сервера (один реплика-инстанс).
+    command: >
+      sh -c "python -m alembic upgrade head &&
+             python -m uvicorn fulfil.main:app --host 0.0.0.0 --port 8000"
+    expose:
+      - "8000"
+
   db:
     image: postgres:16
+    restart: unless-stopped
     environment:
       POSTGRES_USER: fulfil
-      POSTGRES_PASSWORD: fulfil
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: fulfil
-    ports:
-      - "5433:5432"
     volumes:
-      - fulfil_db_data:/var/lib/postgresql/data
+      - db_data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U fulfil"]
       interval: 5s
       timeout: 3s
       retries: 10
+    # Порт наружу не публикуем — доступ только из внутренней сети compose.
 
-  adminer:
-    image: adminer
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN in .env}
     ports:
-      - "8081:8080"
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
     depends_on:
-      - db
+      - app
 
 volumes:
-  fulfil_db_data:
+  db_data:
+  caddy_data:
+  caddy_config:

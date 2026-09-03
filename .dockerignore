@@ -11,8 +11,8 @@
 tests/
 docs/
 alembic/versions/__pycache__/
+docker-compose.local.yml
 docker-compose.yml
-docker-compose.prod.yml
 Dockerfile
 Caddyfile
 .env
