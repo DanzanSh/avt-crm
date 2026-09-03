@@ -1,0 +1,6 @@
+# Домен берётся из переменной окружения DOMAIN (см. docker-compose.prod.yml / .env).
+# Caddy сам получает и продлевает сертификат Let's Encrypt.
+{$DOMAIN} {
+	encode gzip
+	reverse_proxy app:8000
+}
