@@ -9,13 +9,18 @@ WORKDIR /app
 # Зависимости ставим первым слоем — пересборка образа при правках кода быстрее.
 COPY pyproject.toml ./
 COPY src/ ./src/
-RUN pip install --upgrade pip && pip install .
+# -e (editable) обязателен: main.py вычисляет путь к статике как
+# Path(__file__).resolve().parents[2] / "web". При обычном `pip install .`
+# setuptools раскладывает пакет плоско в site-packages/fulfil/main.py, и
+# parents[2] уезжает в .../lib/python3.12 вместо /app — статика (index.html,
+# login.html и т.д.) перестаёт монтироваться, и всё отдаёт 404. С editable-
+# установкой __file__ по-прежнему указывает на /app/src/fulfil/main.py,
+# и parents[2] == /app, как и предполагает COPY web/ ./web/ ниже.
+RUN pip install --upgrade pip && pip install -e .
 
 COPY alembic.ini ./
 COPY alembic/ ./alembic/
 COPY web/ ./web/
-
-# main.py ищет статику в parents[2]/"web" -> /app/web (совпадает с COPY выше).
 
 RUN useradd --create-home app && chown -R app:app /app
 USER app
