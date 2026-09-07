@@ -1,61 +1,61 @@
-# Прод-развёртывание: app + PostgreSQL + Caddy (авто-TLS).
-# Запуск:  docker compose -f docker-compose.yml up -d --build
+# Прод-развёртывание в Timeweb App Platform (тип «Docker → Docker Compose»).
 #
-# Требует файл .env рядом (скопировать из .env.example и заполнить):
+# Ограничения платформы, учтённые здесь (см. deploying-with-docker-compose.md):
+#   * директива `volumes` запрещена — ни bind-mount'ов, ни именованных томов;
+#   * хост-порты 80 и 443 зарезервированы под веб-сервер платформы (он же
+#     терминирует TLS и выдаёт домен) — свой Caddy не нужен и невозможен
+#     (его Caddyfile пришлось бы монтировать томом);
+#   * проксируется на основной домен только ПЕРВЫЙ сервис — поэтому `app` идёт
+#     первым и публикует хост-порт;
+#   * Dockerfile и этот файл лежат в корне репозитория.
+#
+# Переменные задаются в панели App Platform (шаг «Настройка приложения»),
+# а не через .env — файл .env в репозиторий не коммитится:
+#   POSTGRES_PASSWORD=<pass>
 #   DATABASE_URL=postgresql+psycopg://fulfil:<pass>@db:5432/fulfil
-#   POSTGRES_PASSWORD=<pass>              # тот же пароль, что в DATABASE_URL
-#   ADMIN_LOGIN=...
-#   ADMIN_PASSWORD=...
+#   ADMIN_LOGIN=... / ADMIN_PASSWORD=...
 #   JWT_SECRET=...                        # openssl rand -hex 32
-#   DOMAIN=crm.example.ru                 # домен для Caddy/Let's Encrypt
+#   WB_MODE / WB_API_TOKEN / WB_WAREHOUSE_ID — опционально, см. .env.example
 
 services:
+  # Первый сервис — его платформа вешает на основной домен приложения.
   app:
     build: .
     restart: unless-stopped
-    env_file: .env
     depends_on:
       db:
         condition: service_healthy
-    # Миграции прогоняем перед стартом сервера (один реплика-инстанс).
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in App Platform variables}
+      ADMIN_LOGIN: ${ADMIN_LOGIN:?set ADMIN_LOGIN in App Platform variables}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?set ADMIN_PASSWORD in App Platform variables}
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in App Platform variables}
+      WB_MODE: ${WB_MODE:-mock}
+      WB_API_TOKEN: ${WB_API_TOKEN:-}
+      WB_API_BASE: ${WB_API_BASE:-https://marketplace-api.wildberries.ru}
+      WB_WAREHOUSE_ID: ${WB_WAREHOUSE_ID:-}
+    # Миграции прогоняем перед стартом сервера (одна реплика).
     command: >
       sh -c "python -m alembic upgrade head &&
              python -m uvicorn fulfil.main:app --host 0.0.0.0 --port 8000"
-    expose:
-      - "8000"
+    ports:
+      - "8000:8000"
 
+  # ВНИМАНИЕ: без `volumes` данные PostgreSQL живут только в слое контейнера
+  # и теряются при каждом пересоздании (редеплой, перезапуск приложения).
+  # Для боевых данных поднимите управляемую БД Timeweb Cloud (Cloud Databases),
+  # удалите этот сервис вместе с блоком depends_on выше и укажите её адрес
+  # в DATABASE_URL.
   db:
     image: postgres:16
     restart: unless-stopped
     environment:
       POSTGRES_USER: fulfil
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in App Platform variables}
       POSTGRES_DB: fulfil
-    volumes:
-      - db_data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U fulfil"]
       interval: 5s
       timeout: 3s
       retries: 10
-    # Порт наружу не публикуем — доступ только из внутренней сети compose.
-
-  caddy:
-    image: caddy:2
-    restart: unless-stopped
-    environment:
-      DOMAIN: ${DOMAIN:?set DOMAIN in .env}
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data
-      - caddy_config:/config
-    depends_on:
-      - app
-
-volumes:
-  db_data:
-  caddy_data:
-  caddy_config:
+    # Хост-порт не публикуем — доступ только из внутренней сети compose.
