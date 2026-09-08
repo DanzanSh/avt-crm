@@ -20,9 +20,15 @@ class WbProductCard(TypedDict):
     imageUrl: str
 
 
+class WbCursor(TypedDict):
+    updatedAt: str
+    nmID: int
+    total: int
+
+
 class WbCardsPage(TypedDict):
     cards: list[WbProductCard]
-    cursor: str | None  # None = страниц больше нет
+    cursor: WbCursor | None  # None = ответ без курсора
 
 
 class WbOrder(TypedDict):
@@ -39,7 +45,7 @@ class WbSticker(TypedDict):
 
 
 class WBClient(Protocol):
-    def get_product_cards(self, cursor: str | None = None) -> WbCardsPage: ...
+    def get_product_cards(self, cursor: WbCursor | None = None) -> WbCardsPage: ...
 
     def update_fbs_stock(self, warehouse_id: str, barcode: str, qty: int) -> dict: ...
 

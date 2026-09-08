@@ -37,6 +37,7 @@ class ReceiptLine(Base):
     product_id: Mapped[int] = mapped_column(ForeignKey("products.id"))
     cell_id: Mapped[int] = mapped_column(ForeignKey("cells.id"))
     qty: Mapped[int]
+    actor: Mapped[str] = mapped_column(String(64), default="system")
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

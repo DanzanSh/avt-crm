@@ -103,11 +103,37 @@
       input.value = '';
     }
 
-    function logLine(text, ok) {
+    function fmtTime(iso) {
+      if (!iso) return '';
+      const d = new Date(iso);
+      if (isNaN(d)) return '';
+      const p = (n) => String(n).padStart(2, '0');
+      return `${p(d.getDate())}.${p(d.getMonth() + 1)} ${p(d.getHours())}:${p(d.getMinutes())}`;
+    }
+
+    // ok=true → row это объект строки истории; ok=false → row это текст ошибки
+    // (транзиентная отметка, в БД не пишется — это ок).
+    function renderRow(row, ok = true) {
       const div = document.createElement('div');
       div.className = 'log-item';
-      div.innerHTML = `<span>${Fulfil.esc(text)}</span><span style="color:${ok ? 'var(--green)' : 'var(--red)'}">${ok ? '✓' : '✗'}</span>`;
+      const text = ok ? `${row.productName} · ${row.qty} шт · ${row.cellAddress}` : String(row);
+      const time = ok ? fmtTime(row.createdAt) : '';
+      div.innerHTML =
+        `<span>${Fulfil.esc(text)}</span>` +
+        `<span>${time ? `<span style="color:var(--muted); margin-right:8px;">${Fulfil.esc(time)}</span>` : ''}` +
+        `<span style="color:${ok ? 'var(--green)' : 'var(--red)'}">${ok ? '✓' : '✗'}</span></span>`;
       log.prepend(div);
+    }
+
+    async function loadHistory() {
+      try {
+        const rows = await Fulfil.api('GET', '/receiving/history?limit=50');
+        log.innerHTML = '';
+        // сервер отдаёт newest-first; prepend в обратном порядке сохраняет его
+        for (let i = rows.length - 1; i >= 0; i--) renderRow(rows[i], true);
+      } catch (err) {
+        // история не критична для приёмки — тихо игнорируем, покажем при следующем place
+      }
     }
 
     async function classify(code) {
@@ -116,7 +142,7 @@
       } catch (err) {
         Scanner.beep('error');
         Fulfil.toast(Fulfil.errorText(err), 'error');
-        logLine(Fulfil.errorText(err), false);
+        renderRow(Fulfil.errorText(err), false);
         return null;
       }
     }
@@ -164,12 +190,12 @@
         );
         Scanner.beep('ok');
         Fulfil.toast(`${res.qty} шт «${res.productName}» → ${res.cellAddress}`);
-        logLine(`${res.productName} · ${res.qty} шт · ${res.cellAddress}`, true);
+        renderRow(res, true);
         resetToProductStage();
       } catch (err) {
         Scanner.beep('error');
         Fulfil.toast(Fulfil.errorText(err), 'error');
-        logLine(Fulfil.errorText(err), false);
+        renderRow(Fulfil.errorText(err), false);
         input.value = '';
         // ошибка не сбрасывает состояние — можно отсканировать другую ячейку
       } finally {
@@ -210,6 +236,9 @@
       hint.textContent = `Отсканируйте ячейку для ${pendingQty} шт`;
       input.focus();
     });
+
+    // История приёмок постоянна — тянется из БД, переживает F5.
+    loadHistory();
   </script>
 </body>
 </html>

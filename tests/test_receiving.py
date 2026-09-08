@@ -3,7 +3,12 @@ import pytest
 from fulfil.errors import BarcodeNotAllowedError, CellBlockedError, CellOccupiedError
 from fulfil.models.product import Product
 from fulfil.models.storage import CellAllowedBarcode
-from fulfil.services.receiving import place_stock
+from fulfil.services.receiving import (
+    add_receipt_line,
+    get_or_create_open_receipt,
+    list_receipt_lines,
+    place_stock,
+)
 from fulfil.services.storage import block_cell, generate_cells
 
 
@@ -29,9 +34,9 @@ def test_place_stock_split_across_two_cells_client_scenario(db):
     75 докладывается в A-1-10, 175 размещается в B-5-5."""
     product = _make_product(db)
     cells = generate_cells(db, "A", racks=1, cells_per_rack=10)
-    cell_a110 = next(c for c in cells if c.address == "A-1-10")
+    cell_a110 = next(c for c in cells if c.address == "A-1-1-10")
     cells_b = generate_cells(db, "B", racks=5, cells_per_rack=5)
-    cell_b55 = next(c for c in cells_b if c.address == "B-5-5")
+    cell_b55 = next(c for c in cells_b if c.address == "B-5-1-5")
 
     place_stock(db, product, cell_a110, 100)
     row_a = place_stock(db, product, cell_a110, 75)  # докладка того же SKU разрешена
@@ -71,3 +76,40 @@ def test_place_stock_blocks_when_cell_blocked(db):
 
     with pytest.raises(CellBlockedError):
         place_stock(db, product, cell, 1)
+
+
+def test_add_receipt_line_records_actor(db):
+    product = _make_product(db)
+    [cell] = generate_cells(db, "A", racks=1, cells_per_rack=1)
+    receipt = get_or_create_open_receipt(db)
+
+    line = add_receipt_line(db, receipt, product, cell, 7, actor="operator-1")
+    assert line.actor == "operator-1"
+
+
+def test_list_receipt_lines_newest_first_with_joined_fields(db):
+    product = _make_product(db)
+    cells = generate_cells(db, "A", racks=1, cells_per_rack=2)
+    receipt = get_or_create_open_receipt(db)
+    add_receipt_line(db, receipt, product, cells[0], 3, actor="op")
+    add_receipt_line(db, receipt, product, cells[1], 5, actor="op")
+
+    rows = list_receipt_lines(db)
+    assert [r["qty"] for r in rows] == [5, 3]  # newest-first
+    assert rows[0]["productName"] == "Майка белая"
+    assert rows[0]["cellAddress"] == cells[1].address
+    assert rows[0]["actor"] == "op"
+    assert rows[0]["receiptNumber"] == receipt.number
+
+
+def test_receipt_history_visible_from_fresh_session(db):
+    """Эмуляция F5: история читается новым запросом, не живёт в DOM."""
+    product = _make_product(db)
+    [cell] = generate_cells(db, "A", racks=1, cells_per_rack=1)
+    receipt = get_or_create_open_receipt(db)
+    add_receipt_line(db, receipt, product, cell, 2, actor="op")
+
+    db.expire_all()  # как будто новая сессия — ничего не закешировано
+    rows = list_receipt_lines(db)
+    assert len(rows) == 1
+    assert rows[0]["qty"] == 2

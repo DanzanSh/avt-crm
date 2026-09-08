@@ -32,16 +32,16 @@ def _make_product(db, barcode="2000000000017", name="Майка белая"):
 
 
 def test_parse_address_roundtrip():
-    zone, rack, cell = parse_address("A-1-10")
-    assert (zone, rack, cell) == ("A", 1, 10)
-    assert format_address(zone, rack, cell) == "A-1-10"
+    zone, rack, shelf, cell = parse_address("A-1-1-10")
+    assert (zone, rack, shelf, cell) == ("A", 1, 1, 10)
+    assert format_address(zone, rack, shelf, cell) == "A-1-1-10"
 
 
 def test_parse_address_normalizes_cyrillic_homoglyphs():
-    """Оператор в русской раскладке сканирует «А-1-10» кириллицей — зона всё равно
+    """Оператор в русской раскладке сканирует «А-1-1-10» кириллицей — секция всё равно
     латинская 'A' (Scope IN п.1)."""
-    zone, rack, cell = parse_address("А-1-10")
-    assert (zone, rack, cell) == ("A", 1, 10)
+    zone, rack, shelf, cell = parse_address("А-1-1-10")
+    assert (zone, rack, shelf, cell) == ("A", 1, 1, 10)
 
 
 def test_parse_address_rejects_garbage():
@@ -61,25 +61,32 @@ def test_validate_zone_code_latin_rejects_cyrillic_with_suggestion():
 
 
 def test_generate_cells_creates_expected_count(db):
-    cells = generate_cells(db, "A", racks=2, cells_per_rack=3)
-    assert len(cells) == 6
+    cells = generate_cells(db, "A", racks=2, cells_per_rack=3, shelves_per_rack=2)
+    assert len(cells) == 12
     addresses = sorted(c.address for c in cells)
     assert addresses == [
-        "A-1-1",
-        "A-1-2",
-        "A-1-3",
-        "A-2-1",
-        "A-2-2",
-        "A-2-3",
+        "A-1-1-1", "A-1-1-2", "A-1-1-3",
+        "A-1-2-1", "A-1-2-2", "A-1-2-3",
+        "A-2-1-1", "A-2-1-2", "A-2-1-3",
+        "A-2-2-1", "A-2-2-2", "A-2-2-3",
     ]
+
+
+def test_generate_cells_creates_shelves(db):
+    from fulfil.models.storage import Shelf
+
+    generate_cells(db, "A", racks=2, cells_per_rack=3, shelves_per_rack=2)
+    shelves = db.query(Shelf).filter(Shelf.deleted_at.is_(None)).all()
+    assert len(shelves) == 4
+    assert all(s.places_count == 3 for s in shelves)
 
 
 def test_generate_cells_is_additive_not_duplicating(db):
     generate_cells(db, "A", racks=1, cells_per_rack=2)
     second = generate_cells(db, "A", racks=1, cells_per_rack=3)
-    # первые 2 ячейки уже существовали — создаётся только недостающая третья
+    # первые 2 места уже существовали — создаётся только недостающее третье
     assert len(second) == 1
-    assert second[0].address == "A-1-3"
+    assert second[0].address == "A-1-1-3"
 
 
 def test_generate_cells_enforces_limit(db):
@@ -107,7 +114,7 @@ def test_resolve_location_by_barcode_or_address(db):
 
 def test_resolve_location_accepts_cyrillic_homoglyph_address(db):
     [cell] = generate_cells(db, "A", racks=1, cells_per_rack=1)
-    assert resolve_location(db, "А-1-1").id == cell.id  # 'А' кириллическая
+    assert resolve_location(db, "А-1-1-1").id == cell.id  # 'А' кириллическая
 
 
 def test_resolve_location_not_found(db):
@@ -147,7 +154,7 @@ def test_delete_zone_blocked_when_cell_occupied(db):
 
     with pytest.raises(CellsNotReleasableError) as exc_info:
         delete_zone(db, zone, actor="tester")
-    assert exc_info.value.extra["blockingCells"][0]["address"] == "A-1-1"
+    assert exc_info.value.extra["blockingCells"][0]["address"] == "A-1-1-1"
 
 
 def test_delete_zone_cascades_when_empty(db):
@@ -157,7 +164,7 @@ def test_delete_zone_cascades_when_empty(db):
 
     assert list_zones(db) == []
     with pytest.raises(NotFoundError):
-        resolve_location(db, "A-1-1")
+        resolve_location(db, "A-1-1-1")
 
 
 def test_delete_rack_blocked_when_cell_blocked(db):
@@ -183,8 +190,8 @@ def test_rename_zone_rewrites_cell_addresses(db):
     zone = list_zones(db)[0]
     rename_zone(db, zone, "Z", None, actor="tester")
 
-    cell = resolve_location(db, "Z-1-1")
-    assert cell.address == "Z-1-1"
+    cell = resolve_location(db, "Z-1-1-1")
+    assert cell.address == "Z-1-1-1"
     assert cell.zone_code == "Z"
 
 
@@ -193,5 +200,44 @@ def test_generate_cells_after_delete_reuses_address(db):
     [cell] = generate_cells(db, "A", racks=1, cells_per_rack=1)
     delete_cell(db, cell, actor="tester")
     [new_cell] = generate_cells(db, "A", racks=1, cells_per_rack=1)
-    assert new_cell.address == "A-1-1"
+    assert new_cell.address == "A-1-1-1"
     assert new_cell.id != cell.id
+
+
+def test_get_cell_map_has_shelves_level(db):
+    generate_cells(db, "A", racks=1, cells_per_rack=2, shelves_per_rack=2)
+    data = get_cell_map(db)
+    rack = data["zones"][0]["racks"][0]
+    assert len(rack["shelves"]) == 2
+    shelf = rack["shelves"][0]
+    assert shelf["number"] == 1
+    assert len(shelf["cells"]) == 2
+    assert shelf["cells"][0]["shelfNo"] == 1
+
+
+def test_resize_shelf_grows_and_shrinks(db):
+    from fulfil.services.storage import get_live_shelf, resize_shelf
+    from fulfil.models.storage import Shelf
+
+    generate_cells(db, "A", racks=1, cells_per_rack=2)
+    shelf_id = db.query(Shelf).filter(Shelf.deleted_at.is_(None)).one().id
+
+    resize_shelf(db, get_live_shelf(db, shelf_id), 5, actor="tester")
+    assert resolve_location(db, "A-1-1-5").address == "A-1-1-5"
+
+    resize_shelf(db, get_live_shelf(db, shelf_id), 3, actor="tester")
+    with pytest.raises(NotFoundError):
+        resolve_location(db, "A-1-1-5")
+
+
+def test_delete_shelf_blocked_when_cell_has_stock(db):
+    from fulfil.services.storage import delete_shelf, get_live_shelf
+    from fulfil.models.storage import Shelf
+
+    product = _make_product(db)
+    [cell] = generate_cells(db, "A", racks=1, cells_per_rack=1)
+    place_stock(db, product, cell, 3)
+    shelf_id = db.query(Shelf).filter(Shelf.deleted_at.is_(None)).one().id
+
+    with pytest.raises(CellsNotReleasableError):
+        delete_shelf(db, get_live_shelf(db, shelf_id), actor="tester")

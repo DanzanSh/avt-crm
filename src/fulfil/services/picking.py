@@ -22,7 +22,7 @@ def _route_order_query(db: Session, product_id: int):
         select(StockByCell, Cell)
         .join(Cell, Cell.id == StockByCell.cell_id)
         .where(StockByCell.product_id == product_id, StockByCell.qty > 0)
-        .order_by(Cell.zone_code, Cell.rack_no, Cell.cell_no)
+        .order_by(Cell.zone_code, Cell.rack_no, Cell.shelf_no, Cell.cell_no)
     )
 
 
@@ -46,7 +46,7 @@ def build_pick_list(db: Session, order: Order) -> list[PickLine]:
             if take <= 0:
                 continue
             allocations.append(
-                (item.product_id, cell.id, take, (cell.zone_code, cell.rack_no, cell.cell_no))
+                (item.product_id, cell.id, take, (cell.zone_code, cell.rack_no, cell.shelf_no, cell.cell_no))
             )
             remaining -= take
         if remaining > 0:

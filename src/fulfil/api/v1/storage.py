@@ -20,6 +20,7 @@ from fulfil.schemas.storage import (
     RackOut,
     RackResizeRequest,
     ResolveRequest,
+    ShelfResizeRequest,
     ZoneCreateRequest,
     ZoneOut,
     ZoneUpdateRequest,
@@ -35,7 +36,10 @@ def _actor(user: dict) -> str:
 
 @router.post("/cells/generate")
 def generate_cells(body: GenerateCellsRequest, db: Session = Depends(get_db)) -> dict:
-    created = storage_service.generate_cells(db, body.zone_code, body.racks, body.cells_per_rack)
+    created = storage_service.generate_cells(
+        db, body.zone_code, body.racks, body.cells_per_rack,
+        shelves_per_rack=body.shelves_per_rack,
+    )
     return {"created": len(created)}
 
 
@@ -46,7 +50,11 @@ def cell_map(db: Session = Depends(get_db)) -> dict:
 
 @router.get("/cells", response_model=list[CellOut])
 def list_cells(zone_code: str | None = None, db: Session = Depends(get_db)) -> list[Cell]:
-    stmt = select(Cell).where(Cell.deleted_at.is_(None)).order_by(Cell.zone_code, Cell.rack_no, Cell.cell_no)
+    stmt = (
+        select(Cell)
+        .where(Cell.deleted_at.is_(None))
+        .order_by(Cell.zone_code, Cell.rack_no, Cell.shelf_no, Cell.cell_no)
+    )
     if zone_code:
         stmt = stmt.where(Cell.zone_code == zone_code.upper())
     return list(db.scalars(stmt))
@@ -130,7 +138,9 @@ def print_labels(body: PrintLabelsRequest, db: Session = Depends(get_db)) -> Str
         stmt = stmt.where(Cell.zone_code == body.zone_code.upper())
     elif body.filter == "rack" and body.zone_code and body.rack_no:
         stmt = stmt.where(Cell.zone_code == body.zone_code.upper(), Cell.rack_no == body.rack_no)
-    stmt = stmt.order_by(Cell.zone_code, Cell.rack_no, Cell.cell_no)
+        if body.shelf_no:
+            stmt = stmt.where(Cell.shelf_no == body.shelf_no)
+    stmt = stmt.order_by(Cell.zone_code, Cell.rack_no, Cell.shelf_no, Cell.cell_no)
     cells = list(db.scalars(stmt))
 
     pdf_bytes = render_cell_labels_pdf(cells, size=body.size)
@@ -151,9 +161,19 @@ def list_zones(db: Session = Depends(get_db)) -> list:
     return storage_service.list_zones(db)
 
 
-@router.post("/zones", response_model=ZoneOut)
-def create_zone(body: ZoneCreateRequest, db: Session = Depends(get_db), user: dict = Depends(get_current_user)):
-    return storage_service.create_zone(db, body.code, body.name, actor=_actor(user))
+@router.post("/zones")
+def create_zone(body: ZoneCreateRequest, db: Session = Depends(get_db), user: dict = Depends(get_current_user)) -> dict:
+    """Объединённое создание: секция + (если переданы racks) её структура
+    стеллаж → полка → место одним действием."""
+    zone = storage_service.create_zone(db, body.code, body.name, actor=_actor(user))
+    result = ZoneOut.model_validate(zone).model_dump(by_alias=True)
+    if body.racks:
+        created = storage_service.generate_cells(
+            db, zone.code, body.racks, body.cells_per_rack or 1,
+            shelves_per_rack=body.shelves_per_rack or 1,
+        )
+        result["created"] = len(created)
+    return result
 
 
 @router.patch("/zones/{zone_id}")
@@ -173,7 +193,9 @@ def update_zone(
 
     resize_result = None
     if body.racks is not None and body.cells_per_rack is not None:
-        resize_result = _resize_zone(db, zone, body.racks, body.cells_per_rack, actor, dry_run)
+        resize_result = _resize_zone(
+            db, zone, body.racks, body.shelves_per_rack or 1, body.cells_per_rack, actor, dry_run
+        )
         if dry_run:
             return resize_result
 
@@ -186,7 +208,11 @@ def update_zone(
     return result
 
 
-def _resize_zone(db: Session, zone, racks: int, cells_per_rack: int, actor: str, dry_run: bool) -> dict:
+def _resize_zone(
+    db: Session, zone, racks: int, shelves_per_rack: int, cells_per_rack: int, actor: str, dry_run: bool
+) -> dict:
+    """Ресайз секции до формы racks × shelves_per_rack × cells_per_rack (мест на полку).
+    План — в терминах МЕСТ."""
     from fulfil.models.storage import Rack
 
     existing_racks = list(
@@ -199,15 +225,17 @@ def _resize_zone(db: Session, zone, racks: int, cells_per_rack: int, actor: str,
     blocking: list[dict] = []
 
     for rack in existing_racks:
-        target = cells_per_rack if rack.number <= racks else 0
-        plan = storage_service.resize_rack(db, rack, target, actor, dry_run=True)
+        target = shelves_per_rack if rack.number <= racks else 0
+        plan = storage_service.resize_rack(
+            db, rack, target, actor, places_per_shelf=cells_per_rack, dry_run=True
+        )
         to_create_total += plan["toCreate"]
         to_delete.extend(plan["toDelete"])
         blocking.extend(plan["blocking"])
 
     existing_numbers = {r.number for r in existing_racks}
     missing_racks = [n for n in range(1, racks + 1) if n not in existing_numbers]
-    to_create_total += len(missing_racks) * cells_per_rack
+    to_create_total += len(missing_racks) * shelves_per_rack * cells_per_rack
 
     if dry_run:
         return {"toCreate": to_create_total, "toDelete": to_delete, "blocking": blocking}
@@ -216,13 +244,13 @@ def _resize_zone(db: Session, zone, racks: int, cells_per_rack: int, actor: str,
         from fulfil.errors import CellsNotReleasableError
 
         raise CellsNotReleasableError(
-            f"Нельзя изменить размер зоны {zone.code}: {len(blocking)} ячеек заняты или заблокированы.",
+            f"Нельзя изменить размер секции {zone.code}: {len(blocking)} мест заняты или заблокированы.",
             blocking_cells=blocking,
         )
 
     for rack in existing_racks:
-        target = cells_per_rack if rack.number <= racks else 0
-        storage_service.resize_rack(db, rack, target, actor, dry_run=False)
+        target = shelves_per_rack if rack.number <= racks else 0
+        storage_service.resize_rack(db, rack, target, actor, places_per_shelf=cells_per_rack, dry_run=False)
         if target == 0:
             storage_service.delete_rack(db, rack, actor)
 
@@ -230,7 +258,9 @@ def _resize_zone(db: Session, zone, racks: int, cells_per_rack: int, actor: str,
         # добавляем недостающие стеллажи одним блоком, начиная с наименьшего номера
         # (реалистичный случай — все недостающие идут подряд, т.к. существующие уже покрыты выше)
         count = len(missing_racks)
-        storage_service.add_racks_to_zone(db, zone, count, cells_per_rack, actor)
+        storage_service.add_racks_to_zone(
+            db, zone, count, cells_per_rack, actor, shelves_per_rack=shelves_per_rack
+        )
 
     return {"toCreate": to_create_total, "toDelete": to_delete, "blocking": []}
 
@@ -247,7 +277,10 @@ def add_racks(
     zone_id: int, body: AddRacksRequest, db: Session = Depends(get_db), user: dict = Depends(get_current_user)
 ) -> dict:
     zone = storage_service.get_live_zone(db, zone_id)
-    created = storage_service.add_racks_to_zone(db, zone, body.racks, body.cells_per_rack, actor=_actor(user))
+    created = storage_service.add_racks_to_zone(
+        db, zone, body.racks, body.cells_per_rack, actor=_actor(user),
+        shelves_per_rack=body.shelves_per_rack,
+    )
     return {"created": len(created)}
 
 
@@ -260,11 +293,33 @@ def resize_rack(
     user: dict = Depends(get_current_user),
 ) -> dict:
     rack = storage_service.get_live_rack(db, rack_id)
-    return storage_service.resize_rack(db, rack, body.cells_count, actor=_actor(user), dry_run=dry_run)
+    return storage_service.resize_rack(
+        db, rack, body.shelves_count, actor=_actor(user),
+        places_per_shelf=body.places_per_shelf, dry_run=dry_run,
+    )
 
 
 @router.delete("/racks/{rack_id}")
 def delete_rack(rack_id: int, db: Session = Depends(get_db), user: dict = Depends(get_current_user)) -> dict:
     rack = storage_service.get_live_rack(db, rack_id)
     storage_service.delete_rack(db, rack, actor=_actor(user))
+    return {"ok": True}
+
+
+@router.patch("/shelves/{shelf_id}")
+def resize_shelf(
+    shelf_id: int,
+    body: ShelfResizeRequest,
+    dry_run: bool = Query(False),
+    db: Session = Depends(get_db),
+    user: dict = Depends(get_current_user),
+) -> dict:
+    shelf = storage_service.get_live_shelf(db, shelf_id)
+    return storage_service.resize_shelf(db, shelf, body.places_count, actor=_actor(user), dry_run=dry_run)
+
+
+@router.delete("/shelves/{shelf_id}")
+def delete_shelf(shelf_id: int, db: Session = Depends(get_db), user: dict = Depends(get_current_user)) -> dict:
+    shelf = storage_service.get_live_shelf(db, shelf_id)
+    storage_service.delete_shelf(db, shelf, actor=_actor(user))
     return {"ok": True}

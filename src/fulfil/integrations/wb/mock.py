@@ -3,7 +3,7 @@
 import base64
 import uuid
 
-from fulfil.integrations.wb.base import WbCardsPage, WbOrder, WbSticker
+from fulfil.integrations.wb.base import WbCardsPage, WbCursor, WbOrder, WbSticker
 
 _FIXTURE_CARDS: list[dict] = [
     {
@@ -33,8 +33,16 @@ class WBMockClient:
         self._orders: list[dict] = []
         self._supplies: dict[str, dict] = {}
 
-    def get_product_cards(self, cursor: str | None = None) -> WbCardsPage:
-        return {"cards": _FIXTURE_CARDS, "cursor": None}  # type: ignore[typeddict-item]
+    def get_product_cards(self, cursor: WbCursor | None = None) -> WbCardsPage:
+        # Инкрементальный синк: с сохранённым курсором мок отдаёт пусто (total 0 < limit),
+        # так повторный клик «Синхронизировать» возвращает imported: 0.
+        if cursor:
+            return {"cards": [], "cursor": {**cursor, "total": 0}}
+        # Первая выгрузка: одна страница (total 1 < limit 100 → цикл завершается).
+        return {
+            "cards": _FIXTURE_CARDS,
+            "cursor": {"updatedAt": "2026-01-01T00:00:00Z", "nmID": 100001, "total": 1},
+        }
 
     def update_fbs_stock(self, warehouse_id: str, barcode: str, qty: int) -> dict:
         return {"ok": True, "warehouseId": warehouse_id, "barcode": barcode, "qty": qty}

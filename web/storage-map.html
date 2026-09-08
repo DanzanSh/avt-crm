@@ -10,7 +10,7 @@
   <style>
     .toolbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 
-    /* Карточка зоны из макета: синяя заливка, радиус 12, падинг 18. */
+    /* Карточка секции из макета: синяя заливка, радиус 12, падинг 18. */
     .zone-block {
       background: rgba(53, 96, 189, 0.5);
       border: 1px solid var(--border);
@@ -24,15 +24,24 @@
        textContent: renameZone() префилит промпт текстом .zone-title. */
     .zone-title-row .link-action::before { content: '·'; margin-right: 6px; color: rgba(24, 34, 51, 0.55); }
 
-    .rack { display: flex; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; align-items: center; }
+    .rack { margin-bottom: 12px; }
     .rack:last-child { margin-bottom: 0; }
     /* Подпись стеллажа — сама точка входа в меню, отдельных иконок нет. */
     .rack-label {
-      width: 132px; flex: none; font-size: 12px; color: rgba(24, 34, 51, 0.7);
-      text-align: left; white-space: nowrap; padding: 2px 0;
+      display: inline-block; font-size: 12px; font-weight: 700; color: rgba(24, 34, 51, 0.8);
+      white-space: nowrap; padding: 2px 0; margin-bottom: 4px;
       background: none; border: none; font-family: var(--font); cursor: pointer;
     }
     .rack-label:hover, .rack-label:focus-visible { color: var(--text); text-decoration: underline; }
+
+    .shelf { display: flex; gap: 8px; margin: 2px 0 2px 16px; flex-wrap: wrap; align-items: center; }
+    .shelf-label {
+      width: 116px; flex: none; font-size: 12px; color: rgba(24, 34, 51, 0.7);
+      text-align: left; white-space: nowrap; padding: 2px 0;
+      background: none; border: none; font-family: var(--font); cursor: pointer;
+    }
+    .shelf-label:hover, .shelf-label:focus-visible { color: var(--text); text-decoration: underline; }
+
     .cell-tile {
       width: 44px; height: 30px; border-radius: var(--radius-xs); border: none;
       display: flex; align-items: center; justify-content: center;
@@ -47,6 +56,7 @@
     .modal { max-height: 85vh; }
     .field-row { display: flex; gap: 8px; }
     .field-row > * { flex: 1; }
+    .field-hint { font-size: 11px; color: var(--muted); margin: -4px 0 2px; }
     .dry-run-summary { font-size: 13px; color: var(--text-2); background: var(--bg2); border-radius: var(--radius-sm); padding: 10px; }
     .dry-run-summary .blocking { color: var(--red); margin-top: 6px; }
     .dry-run-summary ul { margin: 4px 0 0; padding-left: 18px; }
@@ -56,22 +66,30 @@
   <div class="page-head">
     <h1 class="page-title">Карта склада</h1>
     <div class="toolbar">
-      <button class="btn" id="btnGenerate">+ Сгенерировать ячейки</button>
-      <button class="btn" id="btnPrint">🖨 Печать ШК ячеек</button>
-      <button class="btn-accent" id="btnNewZone">+ Зона</button>
+      <button class="btn" id="btnPrint">🖨 Печать ШК мест</button>
+      <button class="btn-accent" id="btnNewZone">+ Секция</button>
     </div>
   </div>
 
   <div id="map" class="empty-state">Загрузка…</div>
 
+  <!-- Единое создание: секция + её структура (стеллаж → полка → место) одним действием. -->
   <div class="modal-overlay" id="newZoneModal">
     <form class="modal" id="newZoneForm">
-      <h2>Новая зона</h2>
+      <h2>Новая секция</h2>
       <div class="field-row">
         <input class="input" id="newZoneCode" placeholder="Код (латиница, A / B1)" maxlength="2" required />
       </div>
       <div class="field-row">
         <input class="input" id="newZoneName" placeholder="Название (необязательно)" />
+      </div>
+      <div class="field-hint">Оставьте поля ниже пустыми, чтобы создать пустую секцию.</div>
+      <div class="field-row">
+        <input class="input" id="newZoneRacks" type="number" min="1" placeholder="Стеллажей" />
+      </div>
+      <div class="field-row">
+        <input class="input" id="newZoneShelves" type="number" min="1" placeholder="Полок на стеллаж" />
+        <input class="input" id="newZoneCells" type="number" min="1" placeholder="Мест на полку" />
       </div>
       <div class="field-row">
         <button type="button" class="btn" onclick="document.getElementById('newZoneModal').classList.remove('open')">Отмена</button>
@@ -80,32 +98,15 @@
     </form>
   </div>
 
-  <div class="modal-overlay" id="generateModal">
-    <form class="modal" id="generateForm">
-      <h2>Генерация ячеек</h2>
-      <div class="field-row">
-        <input class="input" id="genZone" placeholder="Зона (A)" maxlength="2" required />
-      </div>
-      <div class="field-row">
-        <input class="input" id="genRacks" type="number" min="1" placeholder="Стеллажей" required />
-        <input class="input" id="genCells" type="number" min="1" placeholder="Ячеек на стеллаж" required />
-      </div>
-      <div class="field-row">
-        <button type="button" class="btn" onclick="document.getElementById('generateModal').classList.remove('open')">Отмена</button>
-        <button type="submit" class="btn btn-primary">Создать</button>
-      </div>
-    </form>
-  </div>
-
   <div class="modal-overlay" id="printModal">
     <form class="modal" id="printForm">
-      <h2>Печать ШК ячеек</h2>
+      <h2>Печать ШК мест</h2>
       <div class="field-row">
         <select class="input" id="printFilter">
-          <option value="all">Все ячейки</option>
-          <option value="zone">По зоне</option>
+          <option value="all">Все места</option>
+          <option value="zone">По секции</option>
         </select>
-        <input class="input" id="printZone" placeholder="Зона (если по зоне)" maxlength="2" />
+        <input class="input" id="printZone" placeholder="Секция (если по секции)" maxlength="2" />
       </div>
       <div class="field-row">
         <select class="input" id="printSize">
@@ -120,7 +121,7 @@
     </form>
   </div>
 
-  <!-- Общая модалка предпросмотра ресайза (dry_run) — переиспользуется для зоны и стеллажа. -->
+  <!-- Общая модалка предпросмотра ресайза (dry_run) — переиспользуется для секции, стеллажа и полки. -->
   <div class="modal-overlay" id="resizeModal">
     <div class="modal" id="resizeModalBody"></div>
   </div>
@@ -137,9 +138,6 @@
     let lastCreatedZoneCode = null;
 
     // ── Меню действий ──────────────────────────────────────────────
-    // Одна точка входа вместо россыпи иконок: ссылка «Изменить» у зоны и
-    // подпись стеллажа. Сами действия (renameZone и пр.) не меняются.
-
     const actionMenu = document.getElementById('actionMenu');
     let menuAnchor = null;
 
@@ -174,7 +172,6 @@
       menuAnchor = anchor;
       actionMenu.hidden = false;
 
-      // Позиционирование под якорем с прижатием к вьюпорту.
       const a = anchor.getBoundingClientRect();
       const m = actionMenu.getBoundingClientRect();
       const gap = 6;
@@ -184,8 +181,6 @@
       if (left + m.width > window.innerWidth - 8) left = Math.max(8, window.innerWidth - 8 - m.width);
       actionMenu.style.top = top + 'px';
       actionMenu.style.left = left + 'px';
-      // preventScroll: иначе focus() может прокрутить страницу и сам же
-      // закрыть меню через обработчик scroll ниже.
       const first = actionMenu.querySelector('.menu-item');
       if (first) first.focus({ preventScroll: true });
     }
@@ -208,7 +203,7 @@
         const data = await Fulfil.api('GET', '/storage/cell-map');
         if (!data.zones.length) {
           el.className = 'empty-state';
-          el.textContent = 'Зон пока нет — создайте зону или сгенерируйте ячейки.';
+          el.textContent = 'Секций пока нет — создайте секцию.';
           return;
         }
         el.className = '';
@@ -217,7 +212,7 @@
             (z) => `
           <div class="zone-block" data-zone-id="${z.id}" id="zone-block-${z.id}">
             <div class="zone-title-row">
-              <div class="zone-title">Зона ${Fulfil.esc(z.code)}${z.name ? ' — ' + Fulfil.esc(z.name) : ''}</div>
+              <div class="zone-title">Секция ${Fulfil.esc(z.code)}${z.name ? ' — ' + Fulfil.esc(z.name) : ''}</div>
               <button class="link-action" data-menu="zone" data-zone-id="${z.id}" aria-haspopup="menu">Изменить</button>
             </div>
             ${z.racks.length ? '' : '<div class="empty-state" style="padding:8px 0;">Стеллажей пока нет</div>'}
@@ -227,12 +222,22 @@
               <div class="rack">
                 <button class="rack-label" data-menu="rack" data-rack-id="${r.id}"
                         aria-haspopup="menu" title="Действия со стеллажом">Стеллаж ${r.number}</button>
-                ${r.cells
-                  .map((c) => {
-                    const cls = c.status === 'blocked' ? 'cell-blocked' : c.status === 'occupied' ? 'cell-occupied' : 'cell-free';
-                    const title = `${c.address} · ${c.barcode} · ${c.status}${c.blockedReason ? ' · ' + c.blockedReason : ''}`;
-                    return `<div class="cell-tile ${cls}" data-cell-id="${c.id}" title="${Fulfil.esc(title)}">${c.cellNo}</div>`;
-                  })
+                ${(r.shelves || []).length ? '' : '<div class="field-hint" style="margin-left:16px;">Полок пока нет</div>'}
+                ${(r.shelves || [])
+                  .map(
+                    (s) => `
+                  <div class="shelf">
+                    <button class="shelf-label" data-menu="shelf" data-shelf-id="${s.id}"
+                            aria-haspopup="menu" title="Действия с полкой">Полка ${s.number}</button>
+                    ${s.cells
+                      .map((c) => {
+                        const cls = c.status === 'blocked' ? 'cell-blocked' : c.status === 'occupied' ? 'cell-occupied' : 'cell-free';
+                        const title = `${c.address} · ${c.barcode} · ${c.status}${c.blockedReason ? ' · ' + c.blockedReason : ''}`;
+                        return `<div class="cell-tile ${cls}" data-cell-id="${c.id}" title="${Fulfil.esc(title)}">${c.cellNo}</div>`;
+                      })
+                      .join('')}
+                  </div>`
+                  )
                   .join('')}
               </div>`
               )
@@ -252,7 +257,7 @@
               { label: 'Добавить стеллажи', onClick: () => addRacks(id) },
               { label: 'Изменить размер', onClick: () => resizeZone(id) },
               { sep: true },
-              { label: 'Удалить зону', danger: true, onClick: () => deleteZone(id) },
+              { label: 'Удалить секцию', danger: true, onClick: () => deleteZone(id) },
             ]);
           })
         );
@@ -260,14 +265,24 @@
           btn.addEventListener('click', () => {
             const id = btn.dataset.rackId;
             openMenu(btn, [
-              { label: 'Изменить число ячеек', onClick: () => resizeRack(id) },
+              { label: 'Изменить число полок', onClick: () => resizeRack(id) },
               { sep: true },
               { label: 'Удалить стеллаж', danger: true, onClick: () => deleteRack(id) },
             ]);
           })
         );
+        el.querySelectorAll('[data-menu="shelf"]').forEach((btn) =>
+          btn.addEventListener('click', () => {
+            const id = btn.dataset.shelfId;
+            openMenu(btn, [
+              { label: 'Изменить число мест', onClick: () => resizeShelf(id) },
+              { sep: true },
+              { label: 'Удалить полку', danger: true, onClick: () => deleteShelf(id) },
+            ]);
+          })
+        );
 
-        // Новая зона отображается последней (Scope IN п.1) — прокручиваем к ней.
+        // Новая секция отображается последней — прокручиваем к ней.
         if (lastCreatedZoneCode) {
           const created = data.zones.find((z) => z.code === lastCreatedZoneCode);
           lastCreatedZoneCode = null;
@@ -285,12 +300,12 @@
     async function renameZone(zoneId) {
       const block = document.querySelector(`.zone-block[data-zone-id="${zoneId}"] .zone-title`);
       const current = block ? block.textContent : '';
-      const newCode = prompt('Код зоны (латиница):', current.replace(/^Зона /, '').split(' — ')[0]);
+      const newCode = prompt('Код секции (латиница):', current.replace(/^Секция /, '').split(' — ')[0]);
       if (newCode === null) return;
-      const newName = prompt('Название зоны (можно пусто):', '');
+      const newName = prompt('Название секции (можно пусто):', '');
       try {
         await Fulfil.api('PATCH', `/storage/zones/${zoneId}`, { code: newCode || undefined, name: newName || null });
-        Fulfil.toast('Зона переименована');
+        Fulfil.toast('Секция переименована');
         loadMap();
       } catch (err) {
         Fulfil.toast(Fulfil.errorText(err), 'error');
@@ -300,11 +315,13 @@
     async function addRacks(zoneId) {
       const racks = Number(prompt('Сколько стеллажей добавить?', '1'));
       if (!racks || racks <= 0) return;
-      const cellsPerRack = Number(prompt('Ячеек на новый стеллаж?', '10'));
+      const shelvesPerRack = Number(prompt('Полок на новый стеллаж?', '1'));
+      if (!shelvesPerRack || shelvesPerRack <= 0) return;
+      const cellsPerRack = Number(prompt('Мест на полку?', '10'));
       if (!cellsPerRack || cellsPerRack <= 0) return;
       try {
-        const res = await Fulfil.api('POST', `/storage/zones/${zoneId}/racks`, { racks, cellsPerRack });
-        Fulfil.toast(`Добавлено ячеек: ${res.created}`);
+        const res = await Fulfil.api('POST', `/storage/zones/${zoneId}/racks`, { racks, shelvesPerRack, cellsPerRack });
+        Fulfil.toast(`Добавлено мест: ${res.created}`);
         loadMap();
       } catch (err) {
         Fulfil.toast(Fulfil.errorText(err), 'error');
@@ -313,29 +330,32 @@
 
     function renderDryRunSummary(plan) {
       const blockingHtml = plan.blocking.length
-        ? `<div class="blocking">Мешают ${plan.blocking.length} ячеек: <ul>${plan.blocking
+        ? `<div class="blocking">Мешают ${plan.blocking.length} мест: <ul>${plan.blocking
             .map((b) => `<li>${Fulfil.esc(b.address)} — ${Fulfil.esc(b.status)}${b.qty ? `, ${b.qty} шт` : ''}</li>`)
             .join('')}</ul></div>`
         : '';
       return `
         <div class="dry-run-summary">
-          Будет создано ячеек: <b>${plan.toCreate}</b><br/>
-          Будет удалено ячеек: <b>${plan.toDelete.length}</b>${plan.toDelete.length ? ' (' + plan.toDelete.map(Fulfil.esc).join(', ') + ')' : ''}
+          Будет создано мест: <b>${plan.toCreate}</b><br/>
+          Будет удалено мест: <b>${plan.toDelete.length}</b>${plan.toDelete.length ? ' (' + plan.toDelete.map(Fulfil.esc).join(', ') + ')' : ''}
           ${blockingHtml}
         </div>`;
     }
 
     async function resizeZone(zoneId) {
-      const racks = Number(prompt('Итоговое число стеллажей в зоне:', ''));
+      const racks = Number(prompt('Итоговое число стеллажей в секции:', ''));
       if (!racks || racks <= 0) return;
-      const cellsPerRack = Number(prompt('Ячеек на каждый стеллаж:', ''));
+      const shelvesPerRack = Number(prompt('Полок на каждый стеллаж:', ''));
+      if (!shelvesPerRack || shelvesPerRack <= 0) return;
+      const cellsPerRack = Number(prompt('Мест на каждую полку:', ''));
       if (!cellsPerRack || cellsPerRack <= 0) return;
 
       try {
-        const plan = await Fulfil.api('PATCH', `/storage/zones/${zoneId}?dry_run=true`, { racks, cellsPerRack });
+        const body = { racks, shelvesPerRack, cellsPerRack };
+        const plan = await Fulfil.api('PATCH', `/storage/zones/${zoneId}?dry_run=true`, body);
         openResizeConfirm(plan, async () => {
-          await Fulfil.api('PATCH', `/storage/zones/${zoneId}`, { racks, cellsPerRack });
-          Fulfil.toast('Размер зоны изменён');
+          await Fulfil.api('PATCH', `/storage/zones/${zoneId}`, body);
+          Fulfil.toast('Размер секции изменён');
           loadMap();
         });
       } catch (err) {
@@ -344,14 +364,33 @@
     }
 
     async function resizeRack(rackId) {
-      const cellsCount = Number(prompt('Итоговое число ячеек в стеллаже:', ''));
-      if (!cellsCount || cellsCount <= 0) return;
+      const shelvesCount = Number(prompt('Итоговое число полок в стеллаже:', ''));
+      if (!shelvesCount || shelvesCount <= 0) return;
+      const placesPerShelf = Number(prompt('Мест на каждую новую полку:', '10'));
+      if (!placesPerShelf || placesPerShelf <= 0) return;
 
       try {
-        const plan = await Fulfil.api('PATCH', `/storage/racks/${rackId}?dry_run=true`, { cellsCount });
+        const body = { shelvesCount, placesPerShelf };
+        const plan = await Fulfil.api('PATCH', `/storage/racks/${rackId}?dry_run=true`, body);
         openResizeConfirm(plan, async () => {
-          await Fulfil.api('PATCH', `/storage/racks/${rackId}`, { cellsCount });
-          Fulfil.toast('Размер стеллажа изменён');
+          await Fulfil.api('PATCH', `/storage/racks/${rackId}`, body);
+          Fulfil.toast('Число полок изменено');
+          loadMap();
+        });
+      } catch (err) {
+        Fulfil.toast(Fulfil.errorText(err), 'error');
+      }
+    }
+
+    async function resizeShelf(shelfId) {
+      const placesCount = Number(prompt('Итоговое число мест на полке:', ''));
+      if (!placesCount || placesCount <= 0) return;
+
+      try {
+        const plan = await Fulfil.api('PATCH', `/storage/shelves/${shelfId}?dry_run=true`, { placesCount });
+        openResizeConfirm(plan, async () => {
+          await Fulfil.api('PATCH', `/storage/shelves/${shelfId}`, { placesCount });
+          Fulfil.toast('Число мест изменено');
           loadMap();
         });
       } catch (err) {
@@ -386,10 +425,10 @@
     }
 
     async function deleteZone(zoneId) {
-      if (!confirm('Удалить зону целиком (все её стеллажи и ячейки)?')) return;
+      if (!confirm('Удалить секцию целиком (все её стеллажи, полки и места)?')) return;
       try {
         await Fulfil.api('DELETE', `/storage/zones/${zoneId}`);
-        Fulfil.toast('Зона удалена');
+        Fulfil.toast('Секция удалена');
         loadMap();
       } catch (err) {
         Fulfil.toast(Fulfil.errorText(err), 'error');
@@ -397,10 +436,21 @@
     }
 
     async function deleteRack(rackId) {
-      if (!confirm('Удалить стеллаж целиком (все его ячейки)?')) return;
+      if (!confirm('Удалить стеллаж целиком (все его полки и места)?')) return;
       try {
         await Fulfil.api('DELETE', `/storage/racks/${rackId}`);
         Fulfil.toast('Стеллаж удалён');
+        loadMap();
+      } catch (err) {
+        Fulfil.toast(Fulfil.errorText(err), 'error');
+      }
+    }
+
+    async function deleteShelf(shelfId) {
+      if (!confirm('Удалить полку целиком (все её места)?')) return;
+      try {
+        await Fulfil.api('DELETE', `/storage/shelves/${shelfId}`);
+        Fulfil.toast('Полка удалена');
         loadMap();
       } catch (err) {
         Fulfil.toast(Fulfil.errorText(err), 'error');
@@ -423,7 +473,7 @@
     function renderCellDetail(cell) {
       const body = document.getElementById('detailModalBody');
       body.innerHTML = `
-        <h2>Ячейка ${Fulfil.esc(cell.address)}</h2>
+        <h2>Место ${Fulfil.esc(cell.address)}</h2>
         <div style="font-family:var(--mono); color:var(--muted); margin-bottom:8px;">${Fulfil.esc(cell.barcode)}</div>
         <div>Статус: <span class="badge ${cell.status === 'blocked' ? 'badge-red' : cell.status === 'occupied' ? 'badge-green' : 'badge-muted'}">${Fulfil.esc(cell.status)}</span></div>
         <div style="margin-top:12px; font-weight:600;">Допустимые баркоды</div>
@@ -440,7 +490,7 @@
               ? `<button class="btn" id="btnUnblock">Разблокировать</button>`
               : `<button class="btn btn-danger" id="btnBlock">Заблокировать</button>`
           }
-          <button class="btn btn-danger" id="btnDeleteCell">Удалить ячейку</button>
+          <button class="btn btn-danger" id="btnDeleteCell">Удалить место</button>
         </div>
         <div class="field-row">
           <button class="btn" onclick="document.getElementById('detailModal').classList.remove('open')">Закрыть</button>
@@ -485,11 +535,11 @@
         });
       }
       document.getElementById('btnDeleteCell').addEventListener('click', async () => {
-        if (!confirm(`Удалить ячейку ${cell.address}?`)) return;
+        if (!confirm(`Удалить место ${cell.address}?`)) return;
         try {
           await Fulfil.api('DELETE', `/storage/cells/${cell.id}`);
           document.getElementById('detailModal').classList.remove('open');
-          Fulfil.toast('Ячейка удалена');
+          Fulfil.toast('Место удалено');
           loadMap();
         } catch (err) {
           Fulfil.toast(Fulfil.errorText(err), 'error');
@@ -500,9 +550,6 @@
     document.getElementById('btnNewZone').addEventListener('click', () => {
       document.getElementById('newZoneModal').classList.add('open');
     });
-    document.getElementById('btnGenerate').addEventListener('click', () => {
-      document.getElementById('generateModal').classList.add('open');
-    });
     document.getElementById('btnPrint').addEventListener('click', () => {
       document.getElementById('printModal').classList.add('open');
     });
@@ -510,32 +557,23 @@
     document.getElementById('newZoneForm').addEventListener('submit', async (e) => {
       e.preventDefault();
       const code = document.getElementById('newZoneCode').value;
+      const racks = Number(document.getElementById('newZoneRacks').value) || null;
+      const shelvesPerRack = Number(document.getElementById('newZoneShelves').value) || null;
+      const cellsPerRack = Number(document.getElementById('newZoneCells').value) || null;
+      const payload = { code, name: document.getElementById('newZoneName').value || null };
+      if (racks) {
+        payload.racks = racks;
+        payload.shelvesPerRack = shelvesPerRack || 1;
+        payload.cellsPerRack = cellsPerRack || 1;
+      }
       try {
-        const zone = await Fulfil.api('POST', '/storage/zones', {
-          code,
-          name: document.getElementById('newZoneName').value || null,
-        });
-        Fulfil.toast(`Зона ${zone.code} создана`);
+        const zone = await Fulfil.api('POST', '/storage/zones', payload);
+        Fulfil.toast(
+          zone.created != null ? `Секция ${zone.code} создана, мест: ${zone.created}` : `Секция ${zone.code} создана`
+        );
         lastCreatedZoneCode = zone.code;
         document.getElementById('newZoneModal').classList.remove('open');
         e.target.reset();
-        loadMap();
-      } catch (err) {
-        Fulfil.toast(Fulfil.errorText(err), 'error');
-      }
-    });
-
-    document.getElementById('generateForm').addEventListener('submit', async (e) => {
-      e.preventDefault();
-      try {
-        const res = await Fulfil.api('POST', '/storage/cells/generate', {
-          zoneCode: document.getElementById('genZone').value,
-          racks: Number(document.getElementById('genRacks').value),
-          cellsPerRack: Number(document.getElementById('genCells').value),
-        });
-        Fulfil.toast(`Создано ячеек: ${res.created}`);
-        lastCreatedZoneCode = document.getElementById('genZone').value.trim().toUpperCase();
-        document.getElementById('generateModal').classList.remove('open');
         loadMap();
       } catch (err) {
         Fulfil.toast(Fulfil.errorText(err), 'error');

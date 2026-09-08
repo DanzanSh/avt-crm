@@ -29,6 +29,7 @@
     <div class="toolbar">
       <button class="btn" id="btnNewProduct">+ Товар</button>
       <button class="btn btn-primary" id="btnSync">Синхронизировать с WB</button>
+      <button class="link-action" id="btnFullSync" type="button">Полная пересинхронизация</button>
     </div>
   </div>
 
@@ -238,14 +239,20 @@
       }
     }
 
-    document.getElementById('btnSync').addEventListener('click', async () => {
+    async function runSync(full) {
       try {
-        const res = await Fulfil.api('POST', '/products/sync-from-wb');
+        const res = await Fulfil.api('POST', '/products/sync-from-wb' + (full ? '?full=true' : ''));
         Fulfil.toast(`Синхронизировано товаров: ${res.imported}`);
         load();
       } catch (err) {
         Fulfil.toast(Fulfil.errorText(err), 'error');
       }
+    }
+
+    document.getElementById('btnSync').addEventListener('click', () => runSync(false));
+    document.getElementById('btnFullSync').addEventListener('click', () => {
+      if (!confirm('Полная пересинхронизация: игнорирует сохранённый курсор и заново проходит все карточки WB. Продолжить?')) return;
+      runSync(true);
     });
 
     document.getElementById('btnNewProduct').addEventListener('click', () => {

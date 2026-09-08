@@ -29,7 +29,7 @@
     let html =
       '<div class="sb-brand">' +
         '<span class="sb-mark">' + MARK + '</span>' +
-        '<span class="sb-brand-name">Fulfil CRM</span>' +
+        '<span class="sb-brand-name">AVT fulfil</span>' +
       '</div>';
 
     pages.forEach((p) => {

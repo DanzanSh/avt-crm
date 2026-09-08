@@ -14,7 +14,7 @@ import httpx
 
 from fulfil.config import get_settings
 from fulfil.db import SessionLocal
-from fulfil.integrations.wb.base import WbCardsPage, WbOrder, WbSticker
+from fulfil.integrations.wb.base import WbCardsPage, WbCursor, WbOrder, WbSticker
 from fulfil.models.wb_log import WbApiLog
 
 _MAX_RETRIES = 3
@@ -25,14 +25,15 @@ class WBHttpClient:
     def __init__(self) -> None:
         settings = get_settings()
         self._base = settings.wb_api_base.rstrip("/")
+        self._content_base = settings.wb_content_api_base.rstrip("/")
         self._token = settings.wb_api_token
         self._warehouse_id = settings.wb_warehouse_id
 
     def _headers(self) -> dict:
         return {"Authorization": self._token, "Content-Type": "application/json"}
 
-    def _request(self, method: str, path: str, **kwargs) -> httpx.Response:
-        url = f"{self._base}{path}"
+    def _request(self, method: str, path: str, *, base: str | None = None, **kwargs) -> httpx.Response:
+        url = f"{(base or self._base)}{path}"
         last_exc: Exception | None = None
         for attempt in range(_MAX_RETRIES):
             started = time.monotonic()
@@ -77,9 +78,21 @@ class WBHttpClient:
             db.close()
 
     # --- Каталог ---
-    def get_product_cards(self, cursor: str | None = None) -> WbCardsPage:
-        body = {"settings": {"cursor": {"limit": 100} | ({"updatedAt": cursor} if cursor else {})}}
-        resp = self._request("POST", "/content/v2/get/cards/list", json=body)
+    def get_product_cards(self, cursor: WbCursor | None = None) -> WbCardsPage:
+        cur: dict = {"limit": 100}
+        if cursor:
+            cur["updatedAt"] = cursor["updatedAt"]
+            cur["nmID"] = cursor["nmID"]
+        body = {
+            "settings": {
+                "sort": {"ascending": True},
+                "filter": {"withPhoto": -1},
+                "cursor": cur,
+            }
+        }
+        resp = self._request(
+            "POST", "/content/v2/get/cards/list", base=self._content_base, json=body
+        )
         data = resp.json()
         cards = [
             {
@@ -95,8 +108,13 @@ class WBHttpClient:
             }
             for c in data.get("cards", [])
         ]
-        next_cursor = (data.get("cursor") or {}).get("updatedAt")
-        return {"cards": cards, "cursor": next_cursor}  # type: ignore[typeddict-item]
+        c = data.get("cursor") or {}
+        next_cursor: WbCursor = {
+            "updatedAt": c.get("updatedAt"),
+            "nmID": c.get("nmID"),
+            "total": c.get("total", 0),
+        }
+        return {"cards": cards, "cursor": next_cursor}
 
     # --- Остатки FBS ---
     def update_fbs_stock(self, warehouse_id: str, barcode: str, qty: int) -> dict:
