@@ -91,8 +91,10 @@ def restore_product(product_id: int, db: Session = Depends(get_db), user: dict =
 
 @router.post("/sync-from-wb")
 def sync_from_wb(full: bool = False, db: Session = Depends(get_db)) -> dict:
-    """Инкрементальный синк по кнопке. full=true — полная пересинхронизация
-    (игнорирует сохранённый курсор)."""
+    """Синхронизация карточек WB. По умолчанию инкрементальная (с сохранённого
+    курсора) — это и есть кнопка «Синхронизировать с WB». full=true в UI не
+    выведен, оставлен для ручного/операционного вызова: игнорирует курсор и
+    заново проходит весь каталог."""
     wb_client = get_wb_client()
     return products_service.sync_products_from_wb(db, wb_client, full=full)
 
