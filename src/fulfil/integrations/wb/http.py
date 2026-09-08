@@ -21,6 +21,47 @@ _MAX_RETRIES = 3
 _BACKOFF_BASE_SEC = 0.5
 
 
+def _card_color(card: dict) -> str:
+    """WB /content/v2/get/cards/list отдаёт `characteristics` списком объектов
+    `{id, name, value}` (value — список или скаляр). Раньше код обращался к нему
+    как к словарю `{"Цвет": [...]}` и падал с AttributeError на боевом ответе."""
+    chars = card.get("characteristics")
+    values: list[str] = []
+    if isinstance(chars, list):
+        for ch in chars:
+            if isinstance(ch, dict) and ch.get("name") == "Цвет":
+                v = ch.get("value")
+                if isinstance(v, list):
+                    values.extend(str(x) for x in v if x not in (None, ""))
+                elif v not in (None, ""):
+                    values.append(str(v))
+    elif isinstance(chars, dict):  # на случай иной/старой формы ответа
+        v = chars.get("Цвет") or []
+        values.extend(str(x) for x in v) if isinstance(v, list) else values.append(str(v))
+    return ",".join(values)
+
+
+def _first_dict(seq) -> dict:
+    """Первый элемент списка, если это словарь; иначе пустой словарь.
+    Защищает от `sizes`/`photos` == None или элементов неожиданного типа."""
+    if isinstance(seq, list) and seq and isinstance(seq[0], dict):
+        return seq[0]
+    return {}
+
+
+def _first_sku(card: dict) -> str:
+    skus = _first_dict(card.get("sizes")).get("skus")
+    return skus[0] if isinstance(skus, list) and skus else ""
+
+
+def _first_size(card: dict) -> str:
+    return _first_dict(card.get("sizes")).get("techSize", "") or ""
+
+
+def _first_photo(card: dict) -> str:
+    return _first_dict(card.get("photos")).get("big", "") or ""
+
+
 class WBHttpClient:
     def __init__(self) -> None:
         settings = get_settings()
@@ -99,12 +140,12 @@ class WBHttpClient:
                 "nmId": c.get("nmID"),
                 "imtId": c.get("imtID"),
                 "vendorCode": c.get("vendorCode", ""),
-                "barcode": (c.get("sizes", [{}])[0].get("skus", [""])[0]) if c.get("sizes") else "",
+                "barcode": _first_sku(c),
                 "name": c.get("title", ""),
                 "brand": c.get("brand", ""),
-                "size": (c.get("sizes", [{}])[0].get("techSize", "")) if c.get("sizes") else "",
-                "color": ",".join(c.get("characteristics", {}).get("Цвет", []) or []),
-                "imageUrl": (c.get("photos", [{}])[0].get("big", "")) if c.get("photos") else "",
+                "size": _first_size(c),
+                "color": _card_color(c),
+                "imageUrl": _first_photo(c),
             }
             for c in data.get("cards", [])
         ]
