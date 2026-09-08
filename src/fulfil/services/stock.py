@@ -43,7 +43,7 @@ def get_stock_by_cell(db: Session, product: Product) -> list[dict]:
         select(StockByCell, Cell)
         .join(Cell, Cell.id == StockByCell.cell_id)
         .where(StockByCell.product_id == product.id, StockByCell.qty > 0)
-        .order_by(Cell.zone_code, Cell.rack_no, Cell.cell_no)
+        .order_by(Cell.zone_code, Cell.rack_no, Cell.shelf_no, Cell.cell_no)
     ).all()
     return [
         {"cellId": c.id, "cellAddress": c.address, "cellBarcode": c.barcode, "qty": s.qty}

@@ -52,7 +52,32 @@ class Rack(Base):
     deleted_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), index=True)
 
     zone: Mapped[Zone] = relationship(back_populates="racks")
+    shelves: Mapped[list["Shelf"]] = relationship(
+        back_populates="rack", cascade="all, delete-orphan"
+    )
     cells: Mapped[list["Cell"]] = relationship(back_populates="rack", cascade="all, delete-orphan")
+
+
+class Shelf(Base):
+    """Полка на стеллаже — уровень между стеллажом и местом (адрес A-стеллаж-полка-место).
+    places_count денормализован (как Rack.cells_count) — считается заново в generate/resize."""
+
+    __tablename__ = "shelves"
+    __table_args__ = (
+        Index(
+            "uq_shelf_rack_number_live", "rack_id", "number",
+            unique=True, postgresql_where=_LIVE, sqlite_where=_LIVE,
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    rack_id: Mapped[int] = mapped_column(ForeignKey("racks.id", ondelete="CASCADE"))
+    number: Mapped[int]
+    places_count: Mapped[int] = mapped_column(default=0)
+    deleted_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+
+    rack: Mapped[Rack] = relationship(back_populates="shelves")
+    cells: Mapped[list["Cell"]] = relationship(back_populates="shelf", cascade="all, delete-orphan")
 
 
 class Cell(Base):
@@ -63,15 +88,19 @@ class Cell(Base):
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    # rack_id денормализован (родитель — полка), нужен для запросов уровня стеллажа
+    # и фильтра печати этикеток без лишнего join через shelves.
     rack_id: Mapped[int] = mapped_column(ForeignKey("racks.id", ondelete="CASCADE"))
+    shelf_id: Mapped[int] = mapped_column(ForeignKey("shelves.id", ondelete="CASCADE"), index=True)
 
     # Разобранный адрес — для последовательной сортировки маршрута подбора.
     # Числовые сегменты хранятся как INT: строковая сортировка "10" < "2" сломает маршрут.
     zone_code: Mapped[str] = mapped_column(String(2), index=True)
     rack_no: Mapped[int] = mapped_column(index=True)
-    cell_no: Mapped[int] = mapped_column(index=True)
+    shelf_no: Mapped[int] = mapped_column(index=True)
+    cell_no: Mapped[int] = mapped_column(index=True)  # номер места на полке
 
-    address: Mapped[str] = mapped_column(String(32), index=True)  # 'A-1-10' — денормализовано для UI/сканера
+    address: Mapped[str] = mapped_column(String(32), index=True)  # 'A-1-1-10' — денормализовано для UI/сканера
     barcode: Mapped[str] = mapped_column(String(32), index=True)  # 'CELL-000123'
 
     status: Mapped[CellStatus] = mapped_column(default=CellStatus.FREE, index=True)
@@ -79,6 +108,7 @@ class Cell(Base):
     deleted_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), index=True)
 
     rack: Mapped[Rack] = relationship(back_populates="cells")
+    shelf: Mapped["Shelf"] = relationship(back_populates="cells")
     allowed_barcodes: Mapped[list["CellAllowedBarcode"]] = relationship(
         back_populates="cell", cascade="all, delete-orphan"
     )

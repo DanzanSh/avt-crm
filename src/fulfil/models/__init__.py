@@ -1,5 +1,5 @@
 from fulfil.models.product import Product
-from fulfil.models.storage import Zone, Rack, Cell, CellAllowedBarcode, CellStatus
+from fulfil.models.storage import Zone, Rack, Shelf, Cell, CellAllowedBarcode, CellStatus
 from fulfil.models.receiving import Receipt, ReceiptLine, ReceiptStatus
 from fulfil.models.stock import (
     StockByCell,
@@ -22,11 +22,13 @@ from fulfil.models.fbs import (
 from fulfil.models.wb_log import WbApiLog
 from fulfil.models.audit import AuditLog
 from fulfil.models.idempotency import IdempotencyKey
+from fulfil.models.integration_state import IntegrationState
 
 __all__ = [
     "Product",
     "Zone",
     "Rack",
+    "Shelf",
     "Cell",
     "CellAllowedBarcode",
     "CellStatus",
@@ -50,4 +52,5 @@ __all__ = [
     "WbApiLog",
     "AuditLog",
     "IdempotencyKey",
+    "IntegrationState",
 ]

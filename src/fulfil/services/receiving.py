@@ -69,11 +69,49 @@ def add_receipt_line(
     db: Session, receipt: Receipt, product: Product, cell: Cell, qty: int, actor: str = "system"
 ) -> ReceiptLine:
     place_stock(db, product, cell, qty, actor=actor)
-    line = ReceiptLine(receipt_id=receipt.id, product_id=product.id, cell_id=cell.id, qty=qty)
+    line = ReceiptLine(
+        receipt_id=receipt.id, product_id=product.id, cell_id=cell.id, qty=qty, actor=actor
+    )
     db.add(line)
     db.commit()
     db.refresh(line)
     return line
+
+
+def list_receipt_lines(db: Session, *, limit: int = 50, offset: int = 0) -> list[dict]:
+    """История приёмок, newest-first. Join по id без фильтра deleted_at/archived_at —
+    строка истории должна пережить архивацию товара или удаление места."""
+    rows = db.execute(
+        select(
+            ReceiptLine.id,
+            Receipt.number,
+            Product.name,
+            Product.barcode,
+            Cell.address,
+            ReceiptLine.qty,
+            ReceiptLine.actor,
+            ReceiptLine.created_at,
+        )
+        .join(Receipt, Receipt.id == ReceiptLine.receipt_id)
+        .join(Product, Product.id == ReceiptLine.product_id)
+        .join(Cell, Cell.id == ReceiptLine.cell_id)
+        .order_by(ReceiptLine.id.desc())
+        .limit(limit)
+        .offset(offset)
+    ).all()
+    return [
+        {
+            "id": r.id,
+            "receiptNumber": r.number,
+            "productName": r.name,
+            "barcode": r.barcode,
+            "cellAddress": r.address,
+            "qty": r.qty,
+            "actor": r.actor,
+            "createdAt": r.created_at,
+        }
+        for r in rows
+    ]
 
 
 def finish_receipt(db: Session, receipt: Receipt) -> Receipt:

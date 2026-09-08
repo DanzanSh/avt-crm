@@ -18,7 +18,8 @@ class _FakeWBClient:
         self._cards = cards
 
     def get_product_cards(self, cursor=None):
-        return {"cards": self._cards, "cursor": None}
+        # total 0 < limit 100 → цикл синка завершается за одну страницу
+        return {"cards": self._cards, "cursor": {"updatedAt": None, "nmID": None, "total": 0}}
 
 
 def test_create_product_rejects_invalid_barcode(db):

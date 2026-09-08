@@ -6,7 +6,7 @@ from fulfil.auth import get_current_user
 from fulfil.db import get_db
 from fulfil.errors import NotFoundError
 from fulfil.models.product import Product
-from fulfil.schemas.receiving import PlaceRequest, ReceiptOut
+from fulfil.schemas.receiving import PlaceRequest, ReceiptLineHistoryOut, ReceiptOut
 from fulfil.services import idempotency
 from fulfil.services import receiving as receiving_service
 from fulfil.services.storage import resolve_location
@@ -19,6 +19,12 @@ _ENDPOINT = "receiving.place"
 @router.get("/current", response_model=ReceiptOut)
 def current_receipt(db: Session = Depends(get_db)):
     return receiving_service.get_or_create_open_receipt(db)
+
+
+@router.get("/history", response_model=list[ReceiptLineHistoryOut])
+def history(limit: int = 50, offset: int = 0, db: Session = Depends(get_db)) -> list[dict]:
+    """Постоянная история приёмок (newest-first) — переживает F5 и архивацию товара."""
+    return receiving_service.list_receipt_lines(db, limit=limit, offset=offset)
 
 
 @router.post("/place")
@@ -49,9 +55,14 @@ def place(
 
     result = {
         "ok": True,
+        "lineId": line.id,
+        "receiptNumber": receipt.number,
         "cellAddress": cell.address,
         "productName": product.name,
+        "barcode": product.barcode,
         "qty": line.qty,
+        "actor": line.actor,
+        "createdAt": line.created_at.isoformat() if line.created_at else None,
     }
     idempotency.complete_idempotent(db, _ENDPOINT, x_idempotency_key, result)
     return result

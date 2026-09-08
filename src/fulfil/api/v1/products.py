@@ -90,10 +90,11 @@ def restore_product(product_id: int, db: Session = Depends(get_db), user: dict =
 
 
 @router.post("/sync-from-wb")
-def sync_from_wb(db: Session = Depends(get_db)) -> dict:
+def sync_from_wb(full: bool = False, db: Session = Depends(get_db)) -> dict:
+    """Инкрементальный синк по кнопке. full=true — полная пересинхронизация
+    (игнорирует сохранённый курсор)."""
     wb_client = get_wb_client()
-    imported = products_service.sync_products_from_wb(db, wb_client)
-    return {"imported": imported}
+    return products_service.sync_products_from_wb(db, wb_client, full=full)
 
 
 @router.post("/{product_id}/generate-internal-barcode", response_model=ProductOut)

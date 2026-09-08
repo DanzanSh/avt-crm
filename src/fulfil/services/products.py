@@ -15,8 +15,12 @@ from sqlalchemy.orm import Session
 from fulfil.errors import AppError
 from fulfil.integrations.wb.base import WBClient
 from fulfil.models import audit
+from fulfil.models.integration_state import IntegrationState
 from fulfil.models.product import Product
 from fulfil.models.storage import Cell, CellAllowedBarcode
+
+_WB_STATE_KEY = "wb.product_cards"
+_WB_PAGE_LIMIT = 100
 
 _VALID_GTIN_LENGTHS = {8, 12, 13, 14}
 _INTERNAL_BARCODE_RE = re.compile(r"^LDX-\d{6}$")
@@ -49,48 +53,74 @@ def generate_internal_barcode(db: Session, product: Product, prefix: str = "LDX"
     return code
 
 
-def sync_products_from_wb(db: Session, wb_client: WBClient) -> int:
+def _upsert_card(db: Session, card: dict) -> bool:
+    """Апсёрт одной карточки WB. Порядок матчинга: сперва по wb_nm_id, затем по
+    barcode, иначе создать. Возвращает True, если карточка обработана."""
+    barcode = card.get("barcode") or ""
+    nm_id = card.get("nmId")
+
+    product = None
+    if nm_id is not None:
+        product = db.scalar(
+            select(Product).where(Product.wb_nm_id == nm_id, Product.archived_at.is_(None))
+        )
+    if product is None and barcode:
+        product = db.scalar(
+            select(Product).where(Product.barcode == barcode, Product.archived_at.is_(None))
+        )
+    if product is None:
+        if not barcode:
+            return False  # нечем идентифицировать новый товар
+        product = Product(barcode=barcode, name=card.get("name", ""))
+        db.add(product)
+        db.flush()
+
+    manual = set(product.manual_fields or [])
+    field_values = {
+        "name": card.get("name", product.name),
+        "brand": card.get("brand"),
+        "size": card.get("size"),
+        "color": card.get("color"),
+        "vendor_code": card.get("vendorCode"),
+        "image_url": card.get("imageUrl"),
+    }
+    for field, value in field_values.items():
+        if field in manual:
+            continue  # изменено вручную — синк не перезаписывает (Scope IN п.4)
+        setattr(product, field, value)
+
+    product.wb_nm_id = nm_id
+    product.wb_imt_id = card.get("imtId")
+    product.synced_at = dt.datetime.now(dt.timezone.utc)
+    return True
+
+
+def sync_products_from_wb(db: Session, wb_client: WBClient, *, full: bool = False) -> dict:
+    """Инкрементальная синхронизация карточек WB. Курсор {updatedAt, nmID} последнего
+    ответа сохраняется в integration_state и переиспользуется при следующем запуске.
+    full=True — игнорировать сохранённый курсор (полная пересинхронизация)."""
+    state = db.get(IntegrationState, _WB_STATE_KEY)
+    cursor = None if full or not state or not (state.cursor or {}).get("updatedAt") else state.cursor
+
     imported = 0
-    cursor: str | None = None
+    last = cursor
     while True:
         page = wb_client.get_product_cards(cursor)
         for card in page["cards"]:
-            barcode = card.get("barcode") or ""
-            if not barcode:
-                continue
-            product = db.scalar(
-                select(Product).where(Product.barcode == barcode, Product.archived_at.is_(None))
-            )
-            if product is None:
-                product = Product(barcode=barcode, name=card.get("name", ""))
-                db.add(product)
-                db.flush()
-
-            manual = set(product.manual_fields or [])
-            field_values = {
-                "name": card.get("name", product.name),
-                "brand": card.get("brand"),
-                "size": card.get("size"),
-                "color": card.get("color"),
-                "vendor_code": card.get("vendorCode"),
-                "image_url": card.get("imageUrl"),
-            }
-            for field, value in field_values.items():
-                if field in manual:
-                    continue  # изменено вручную — синк не перезаписывает (Scope IN п.4)
-                setattr(product, field, value)
-
-            product.wb_nm_id = card.get("nmId")
-            product.wb_imt_id = card.get("imtId")
-            product.synced_at = dt.datetime.now(dt.timezone.utc)
-            imported += 1
-
-        cursor = page.get("cursor")
-        if not cursor:
+            if _upsert_card(db, card):
+                imported += 1
+        c = page.get("cursor") or {}
+        last = {"updatedAt": c.get("updatedAt"), "nmID": c.get("nmID")}
+        if c.get("total", 0) < _WB_PAGE_LIMIT:
             break
+        cursor = last
 
+    if state is None:
+        db.add(IntegrationState(key=_WB_STATE_KEY, cursor=last or {}))
+    else:
+        state.cursor = last or {}
     db.commit()
-    return imported
+    return {"imported": imported, "cursor": last}
 
 
 def create_product(

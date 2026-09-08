@@ -28,9 +28,9 @@ def test_pick_list_drains_first_cell_before_next_not_50_50(db):
     строки должны быть 75 + 25, а НЕ 50/50."""
     product = _make_product(db)
     cells_a = generate_cells(db, "A", racks=1, cells_per_rack=10)
-    cell_a110 = next(c for c in cells_a if c.address == "A-1-10")
+    cell_a110 = next(c for c in cells_a if c.address == "A-1-1-10")
     cells_b = generate_cells(db, "B", racks=5, cells_per_rack=5)
-    cell_b55 = next(c for c in cells_b if c.address == "B-5-5")
+    cell_b55 = next(c for c in cells_b if c.address == "B-5-1-5")
 
     place_stock(db, product, cell_a110, 75)
     place_stock(db, product, cell_b55, 175)
@@ -48,8 +48,8 @@ def test_pick_list_route_order_is_numeric_not_lexicographic(db):
     ('10' < '2' лексикографически)."""
     product = _make_product(db)
     cells = generate_cells(db, "A", racks=1, cells_per_rack=10)
-    cell_2 = next(c for c in cells if c.address == "A-1-2")
-    cell_10 = next(c for c in cells if c.address == "A-1-10")
+    cell_2 = next(c for c in cells if c.address == "A-1-1-2")
+    cell_10 = next(c for c in cells if c.address == "A-1-1-10")
 
     # размещаем в порядке "10 затем 2", чтобы сортировка была не по вставке, а по адресу
     place_stock(db, product, cell_10, 5)

@@ -20,6 +20,8 @@ class Settings(BaseSettings):
     wb_mode: Literal["http", "mock"] = "mock"
     wb_api_token: str = ""
     wb_api_base: str = "https://marketplace-api.wildberries.ru"
+    # Карточки товаров живут на отдельном хосте content-api, не на marketplace-api.
+    wb_content_api_base: str = "https://content-api.wildberries.ru"
     wb_warehouse_id: str = ""
 
 
