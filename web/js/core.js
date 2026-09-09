@@ -86,9 +86,27 @@
     el._timer = setTimeout(() => el.classList.remove('show'), 3200);
   }
 
+  /** Миниатюра фото товара: URL от WB вида
+   * https://basket-27.wbbasket.ru/vol.../images/big/1.webp — замена /images/big/
+   * на /images/tm/ даёт лёгкий thumbnail. Если URL пустой или не подходит под
+   * шаблон — возвращаем как есть (миграция и повторный синк не нужны). */
+  function thumb(url) {
+    if (!url || typeof url !== 'string') return url || '';
+    return url.indexOf('/images/big/') !== -1
+      ? url.replace('/images/big/', '/images/tm/')
+      : url;
+  }
+
   /** Единая обработка ошибки app-error: {detail, reasonCode, whatToDo, suggestions?, blockingCells?}. */
   function errorText(err) {
     if (!err) return 'Неизвестная ошибка';
+    // 422 от FastAPI: detail — массив объектов {loc, msg, type}, а не строка.
+    if (Array.isArray(err.detail)) {
+      const msgs = err.detail
+        .map((d) => (d && d.msg ? d.msg : null))
+        .filter(Boolean);
+      return msgs.length ? msgs.join('; ') : 'Ошибка ' + (err.status || '');
+    }
     let text = err.detail || 'Ошибка ' + (err.status || '');
     if (err.whatToDo) text += ' ' + err.whatToDo;
     if (err.suggestions && err.suggestions.length) {
@@ -117,6 +135,6 @@
   }
 
   window.Fulfil = {
-    api, getToken, setToken, logout, decodeJwt, esc, toast, errorText, requireAuth, newIdempotencyKey,
+    api, getToken, setToken, logout, decodeJwt, esc, toast, errorText, requireAuth, newIdempotencyKey, thumb,
   };
 })();

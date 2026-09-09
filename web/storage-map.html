@@ -19,7 +19,7 @@
       margin-bottom: 20px;
     }
     .zone-title-row { display: flex; align-items: center; gap: 6px; margin: 0 0 12px; }
-    .zone-title { font-family: var(--font-ui); font-weight: 700; font-size: 14px; color: var(--text); margin: 0; }
+    .zone-title { font-family: var(--font-ui); font-weight: 700; font-size: 16px; color: var(--text); margin: 0; }
     /* Разделитель «·» из макета — псевдоэлементом, чтобы не попадать в
        textContent: renameZone() префилит промпт текстом .zone-title. */
     .zone-title-row .link-action::before { content: '·'; margin-right: 6px; color: rgba(24, 34, 51, 0.55); }
@@ -28,7 +28,7 @@
     .rack:last-child { margin-bottom: 0; }
     /* Подпись стеллажа — сама точка входа в меню, отдельных иконок нет. */
     .rack-label {
-      display: inline-block; font-size: 12px; font-weight: 700; color: rgba(24, 34, 51, 0.8);
+      display: inline-block; font-size: 14px; font-weight: 700; color: rgba(24, 34, 51, 0.8);
       white-space: nowrap; padding: 2px 0; margin-bottom: 4px;
       background: none; border: none; font-family: var(--font); cursor: pointer;
     }
@@ -36,7 +36,7 @@
 
     .shelf { display: flex; gap: 8px; margin: 2px 0 2px 16px; flex-wrap: wrap; align-items: center; }
     .shelf-label {
-      width: 116px; flex: none; font-size: 12px; color: rgba(24, 34, 51, 0.7);
+      width: 116px; flex: none; font-size: 14px; color: rgba(24, 34, 51, 0.7);
       text-align: left; white-space: nowrap; padding: 2px 0;
       background: none; border: none; font-family: var(--font); cursor: pointer;
     }
@@ -45,7 +45,7 @@
     .cell-tile {
       width: 44px; height: 30px; border-radius: var(--radius-xs); border: none;
       display: flex; align-items: center; justify-content: center;
-      font-size: 12px; font-weight: 700; letter-spacing: 0.02em;
+      font-size: 14px; font-weight: 700; letter-spacing: 0.02em;
       color: var(--text); cursor: default; flex: none;
     }
     .cell-free { background: var(--cell-free); color: var(--text-2); }
@@ -56,10 +56,31 @@
     .modal { max-height: 85vh; }
     .field-row { display: flex; gap: 8px; }
     .field-row > * { flex: 1; }
-    .field-hint { font-size: 11px; color: var(--muted); margin: -4px 0 2px; }
-    .dry-run-summary { font-size: 13px; color: var(--text-2); background: var(--bg2); border-radius: var(--radius-sm); padding: 10px; }
+    .field-hint { font-size: 13px; color: var(--muted); margin: -4px 0 2px; }
+    .dry-run-summary { font-size: 16px; color: var(--text-2); background: var(--bg2); border-radius: var(--radius-sm); padding: 10px; }
     .dry-run-summary .blocking { color: var(--red); margin-top: 6px; }
     .dry-run-summary ul { margin: 4px 0 0; padding-left: 18px; }
+
+    /* C.3 — количество товара под номером места. Плитку делаем выше и в две
+       строки; существующие правила .cell-tile* выше НЕ трогаем — только
+       переопределяем нужное здесь. */
+    .cell-tile {
+      height: 40px;
+      flex-direction: column;
+      line-height: 1;
+      gap: 2px;
+      padding: 2px 0;
+    }
+    .cell-tile__no { font-size: 14px; }
+    .cell-tile__qty { font-size: 10px; font-weight: 700; color: var(--muted); }
+    .cell-tile.cell-occupied .cell-tile__qty { color: rgba(6, 48, 26, 0.75); }
+    .cell-tile.cell-blocked .cell-tile__qty { color: rgba(255, 255, 255, 0.85); }
+
+    /* C.3 — блоки «Содержимое» и «Последние приёмки» в модалке места. */
+    .cell-contents td, .cell-receipts td { font-size: 14px; padding: 6px 10px; }
+    .cell-contents th, .cell-receipts th { font-size: 12px; padding: 6px 10px; }
+    .cell-contents .num, .cell-receipts .num { text-align: right; font-variant-numeric: tabular-nums; }
+    .cell-empty-row { color: var(--muted); }
   </style>
 </head>
 <body>
@@ -136,6 +157,15 @@
   <script src="/js/sidebar.js"></script>
   <script>
     let lastCreatedZoneCode = null;
+
+    // Статус места — на русском (идиома STATUS_LABELS из fbs/orders.html):
+    // значение enum -> [подпись, класс бейджа]. API отдаёт free/occupied/blocked.
+    const CELL_STATUS_LABELS = {
+      free: ['свободно', 'badge-muted'],
+      occupied: ['занято', 'badge-green'],
+      blocked: ['заблокировано', 'badge-red'],
+    };
+    const cellStatusLabel = (s) => (CELL_STATUS_LABELS[s] || [s, 'badge-muted'])[0];
 
     // ── Меню действий ──────────────────────────────────────────────
     const actionMenu = document.getElementById('actionMenu');
@@ -232,8 +262,9 @@
                     ${s.cells
                       .map((c) => {
                         const cls = c.status === 'blocked' ? 'cell-blocked' : c.status === 'occupied' ? 'cell-occupied' : 'cell-free';
-                        const title = `${c.address} · ${c.barcode} · ${c.status}${c.blockedReason ? ' · ' + c.blockedReason : ''}`;
-                        return `<div class="cell-tile ${cls}" data-cell-id="${c.id}" title="${Fulfil.esc(title)}">${c.cellNo}</div>`;
+                        const title = `${c.address} · ${cellStatusLabel(c.status)}${c.qty > 0 ? ' · ' + c.qty + ' шт' : ''}${c.blockedReason ? ' · ' + c.blockedReason : ''}`;
+                        const qtyLine = c.qty > 0 ? `<span class="cell-tile__qty">${c.qty}</span>` : '';
+                        return `<div class="cell-tile ${cls}" data-cell-id="${c.id}" title="${Fulfil.esc(title)}"><span class="cell-tile__no">${c.cellNo}</span>${qtyLine}</div>`;
                       })
                       .join('')}
                   </div>`
@@ -331,7 +362,7 @@
     function renderDryRunSummary(plan) {
       const blockingHtml = plan.blocking.length
         ? `<div class="blocking">Мешают ${plan.blocking.length} мест: <ul>${plan.blocking
-            .map((b) => `<li>${Fulfil.esc(b.address)} — ${Fulfil.esc(b.status)}${b.qty ? `, ${b.qty} шт` : ''}</li>`)
+            .map((b) => `<li>${Fulfil.esc(b.address)} — ${Fulfil.esc(cellStatusLabel(b.status))}${b.qty ? `, ${b.qty} шт` : ''}</li>`)
             .join('')}</ul></div>`
         : '';
       return `
@@ -470,12 +501,60 @@
       }
     }
 
+    // Дата приёмки в компактном виде DD.MM HH:MM (как в receiving.html).
+    function fmtReceiptDate(iso) {
+      if (!iso) return '';
+      const d = new Date(iso);
+      if (isNaN(d)) return '';
+      const p = (n) => String(n).padStart(2, '0');
+      return `${p(d.getDate())}.${p(d.getMonth() + 1)} ${p(d.getHours())}:${p(d.getMinutes())}`;
+    }
+
     function renderCellDetail(cell) {
       const body = document.getElementById('detailModalBody');
+
+      // C.3 — расклад товара по ячейке: что лежит и последние приёмки сюда.
+      const contents = cell.contents || [];
+      const contentsRows = contents.length
+        ? contents
+            .map(
+              (p) => `
+              <tr>
+                <td>${Fulfil.esc(p.productName)}</td>
+                <td class="num">${p.qty}</td>
+              </tr>`
+            )
+            .join('')
+        : '<tr><td class="cell-empty-row" colspan="2">место свободно</td></tr>';
+
+      const receipts = cell.lastReceipts || [];
+      const receiptsBlock = receipts.length
+        ? `
+        <div style="margin-top:12px; font-weight:600;">Последние приёмки</div>
+        <table class="cell-receipts no-mobile-cards" style="margin:6px 0;">
+          <tbody>
+            ${receipts
+              .map(
+                (r) => `
+              <tr>
+                <td style="white-space:nowrap; color:var(--muted);">${Fulfil.esc(fmtReceiptDate(r.createdAt))}</td>
+                <td>${Fulfil.esc(r.productName)}</td>
+                <td class="num">${r.qty}</td>
+              </tr>`
+              )
+              .join('')}
+          </tbody>
+        </table>`
+        : '';
+
       body.innerHTML = `
         <h2>Место ${Fulfil.esc(cell.address)}</h2>
-        <div style="font-family:var(--mono); color:var(--muted); margin-bottom:8px;">${Fulfil.esc(cell.barcode)}</div>
-        <div>Статус: <span class="badge ${cell.status === 'blocked' ? 'badge-red' : cell.status === 'occupied' ? 'badge-green' : 'badge-muted'}">${Fulfil.esc(cell.status)}</span></div>
+        <div>Статус: <span class="badge ${(CELL_STATUS_LABELS[cell.status] || ['', 'badge-muted'])[1]}">${Fulfil.esc(cellStatusLabel(cell.status))}</span></div>
+        <div style="margin-top:12px; font-weight:600;">Содержимое</div>
+        <table class="cell-contents no-mobile-cards" style="margin:6px 0;">
+          <tbody>${contentsRows}</tbody>
+        </table>
+        ${receiptsBlock}
         <div style="margin-top:12px; font-weight:600;">Допустимые баркоды</div>
         <div id="allowedList" style="font-family:var(--mono); font-size:12px; margin:6px 0;">
           ${cell.allowedBarcodes.length ? cell.allowedBarcodes.map((b) => Fulfil.esc(b)).join(', ') : '<span style="color:var(--muted)">любой товар (допуск не настроен)</span>'}

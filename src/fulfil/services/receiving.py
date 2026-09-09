@@ -17,7 +17,20 @@ from fulfil.services.storage import check_placement_allowed, find_free_cell_sugg
 from fulfil.services.stock_ledger import apply_move
 
 
-def place_stock(db: Session, product: Product, cell: Cell, qty: int, actor: str = "system") -> StockByCell:
+def place_stock(
+    db: Session,
+    product: Product,
+    cell: Cell,
+    qty: int,
+    actor: str = "system",
+    *,
+    commit: bool = True,
+    ref_type: str | None = None,
+    ref_id: int | None = None,
+) -> StockByCell:
+    """Размещение остатка при приёмке. По умолчанию коммитит сам (публичный вызов);
+    из add_receipt_line зовётся с commit=False, чтобы строка приёмки и движение
+    остатка легли одной транзакцией. ref_type/ref_id пробрасываются в apply_move."""
     if qty <= 0:
         raise ValueError("qty должен быть положительным")
 
@@ -44,10 +57,12 @@ def place_stock(db: Session, product: Product, cell: Cell, qty: int, actor: str 
 
     row = apply_move(
         db, product=product, cell=locked_cell, qty_delta=qty, reason=MoveReason.RECEIPT, actor=actor,
+        ref_type=ref_type, ref_id=ref_id,
     )
 
-    db.commit()
-    db.refresh(row)
+    if commit:
+        db.commit()
+        db.refresh(row)
     return row
 
 
@@ -68,20 +83,30 @@ def get_or_create_open_receipt(db: Session) -> Receipt:
 def add_receipt_line(
     db: Session, receipt: Receipt, product: Product, cell: Cell, qty: int, actor: str = "system"
 ) -> ReceiptLine:
-    place_stock(db, product, cell, qty, actor=actor)
+    # Порядок важен: сперва строка приёмки (нужен line.id для ref_id движения),
+    # затем размещение остатка без коммита — оба в одной транзакции. Падение между
+    # шагами больше не оставляет товар на остатке без строки истории (C.4).
     line = ReceiptLine(
         receipt_id=receipt.id, product_id=product.id, cell_id=cell.id, qty=qty, actor=actor
     )
     db.add(line)
+    db.flush()
+    place_stock(
+        db, product, cell, qty, actor=actor,
+        commit=False, ref_type="receipt_line", ref_id=line.id,
+    )
     db.commit()
     db.refresh(line)
     return line
 
 
-def list_receipt_lines(db: Session, *, limit: int = 50, offset: int = 0) -> list[dict]:
+def list_receipt_lines(
+    db: Session, *, limit: int = 50, offset: int = 0, cell_id: int | None = None
+) -> list[dict]:
     """История приёмок, newest-first. Join по id без фильтра deleted_at/archived_at —
-    строка истории должна пережить архивацию товара или удаление места."""
-    rows = db.execute(
+    строка истории должна пережить архивацию товара или удаление места.
+    cell_id — необязательный фильтр по месту приёмки (для карточки места, C.2)."""
+    stmt = (
         select(
             ReceiptLine.id,
             Receipt.number,
@@ -96,9 +121,10 @@ def list_receipt_lines(db: Session, *, limit: int = 50, offset: int = 0) -> list
         .join(Product, Product.id == ReceiptLine.product_id)
         .join(Cell, Cell.id == ReceiptLine.cell_id)
         .order_by(ReceiptLine.id.desc())
-        .limit(limit)
-        .offset(offset)
-    ).all()
+    )
+    if cell_id is not None:
+        stmt = stmt.where(ReceiptLine.cell_id == cell_id)
+    rows = db.execute(stmt.limit(limit).offset(offset)).all()
     return [
         {
             "id": r.id,

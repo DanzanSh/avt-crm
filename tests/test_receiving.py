@@ -1,7 +1,9 @@
 import pytest
+from sqlalchemy import select
 
 from fulfil.errors import BarcodeNotAllowedError, CellBlockedError, CellOccupiedError
 from fulfil.models.product import Product
+from fulfil.models.stock import StockMove
 from fulfil.models.storage import CellAllowedBarcode
 from fulfil.services.receiving import (
     add_receipt_line,
@@ -9,7 +11,7 @@ from fulfil.services.receiving import (
     list_receipt_lines,
     place_stock,
 )
-from fulfil.services.storage import block_cell, generate_cells
+from fulfil.services.storage import block_cell, generate_cells, get_cell_contents, get_cell_map
 
 
 def _make_product(db, barcode="2000000000017", name="Майка белая") -> Product:
@@ -100,6 +102,31 @@ def test_list_receipt_lines_newest_first_with_joined_fields(db):
     assert rows[0]["cellAddress"] == cells[1].address
     assert rows[0]["actor"] == "op"
     assert rows[0]["receiptNumber"] == receipt.number
+
+
+def test_receiving_fills_cell_contents_map_qty_and_move_ref(db):
+    """Приёмка в место → содержимое места, qty на карте и связь движения со строкой (C.5)."""
+    product = _make_product(db)
+    cells = generate_cells(db, "A", racks=1, cells_per_rack=2)
+    receipt = get_or_create_open_receipt(db)
+
+    line = add_receipt_line(db, receipt, product, cells[0], 9, actor="op")
+
+    contents = get_cell_contents(db, cells[0])
+    assert len(contents) == 1
+    assert contents[0]["productId"] == product.id
+    assert contents[0]["productName"] == "Майка белая"
+    assert contents[0]["qty"] == 9
+
+    data = get_cell_map(db)
+    map_cells = data["zones"][0]["racks"][0]["shelves"][0]["cells"]
+    by_address = {c["address"]: c for c in map_cells}
+    assert by_address[cells[0].address]["qty"] == 9
+    assert by_address[cells[1].address]["qty"] == 0  # место без остатка
+
+    move = db.scalar(select(StockMove).where(StockMove.cell_id == cells[0].id))
+    assert move.ref_type == "receipt_line"
+    assert move.ref_id == line.id
 
 
 def test_receipt_history_visible_from_fresh_session(db):

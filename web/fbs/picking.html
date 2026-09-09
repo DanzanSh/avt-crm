@@ -8,12 +8,12 @@
   <script src="/js/core.js"></script>
   <script src="/js/scan-layout.js"></script>
   <style>
-    .page-sub { color: var(--muted); font-size: 12px; line-height: 1.2; margin: -12px 0 20px; }
+    .page-sub { color: var(--muted); font-size: 14px; line-height: 1.2; margin: -12px 0 20px; }
     .pick-line {
       display: flex;
       justify-content: space-between;
       gap: 16px;
-      font-size: 13px;
+      font-size: 16px;
       color: var(--text-2);
       padding: 9px 0;
       border-bottom: 1px solid var(--divider);
@@ -24,40 +24,51 @@
     .sticker-box img { max-width: 220px; border: 1px solid var(--border); border-radius: var(--radius-sm); }
     .mark-row { display: flex; gap: 8px; flex-wrap: wrap; }
     .mark-row .input { width: auto; flex: 1 1 200px; }
-    .mark-list { font-family: var(--mono); font-size: 12px; color: var(--muted); margin-top: 10px; }
+    .mark-list { font-family: var(--mono); font-size: 14px; color: var(--muted); margin-top: 10px; }
     .section { padding: 18px; margin-bottom: 18px; }
-    .section h2 { font-size: 15px; font-weight: 400; margin: 0 0 12px; }
-    #btnConfirm { width: 100%; justify-content: center; padding: 12px 16px; font-size: 13px; }
+    .section h2 { font-size: 18px; font-weight: 700; margin: 0 0 12px; }
+    #btnConfirm { width: 100%; justify-content: center; padding: 12px 16px; font-size: 16px; }
+    /* Экран выбора заказа, когда orderId не задан в query-строке. */
+    .order-id { font-family: var(--mono); font-size: 18px; color: var(--text); }
+    #orderPicker .list-card { text-decoration: none; }
+    #orderPicker .empty-state a.btn { margin-top: 12px; }
   </style>
 </head>
 <body>
   <div class="page-head" style="margin-bottom:12px">
     <h1 class="page-title">Сборка заказа <span id="orderIdLabel"></span></h1>
   </div>
-  <div class="page-sub">Соберите товар по маршруту, отсканируйте марки «Честный знак», подтвердите сборку.</div>
 
-  <div class="card section">
-    <h2>Лист подбора (по маршруту)</h2>
-    <div id="pickList">Загрузка…</div>
-  </div>
+  <!-- Экран выбора заказа: показывается, когда orderId не задан в query-строке. -->
+  <div id="orderPicker" hidden></div>
 
-  <div class="card section sticker-box">
-    <h2>Этикетка заказа</h2>
-    <div id="stickerBox">
-      <button class="btn" id="btnSticker">Получить и напечатать</button>
+  <!-- Детали сборки конкретного заказа: показываются только при заданном orderId. -->
+  <div id="orderDetails" hidden>
+    <div class="page-sub">Соберите товар по маршруту, отсканируйте марки «Честный знак», подтвердите сборку.</div>
+
+    <div class="card section">
+      <h2>Лист подбора (по маршруту)</h2>
+      <div id="pickList">Загрузка…</div>
     </div>
-  </div>
 
-  <div class="card section">
-    <h2>Код маркировки «Честный знак»</h2>
-    <div class="mark-row">
-      <select class="input" id="itemSelect" style="max-width:260px"></select>
-      <input class="input" id="markInput" data-scan placeholder="Скан кода…" style="font-family:var(--mono)" />
+    <div class="card section sticker-box">
+      <h2>Этикетка заказа</h2>
+      <div id="stickerBox">
+        <button class="btn" id="btnSticker">Получить и напечатать</button>
+      </div>
     </div>
-    <div class="mark-list" id="markList"></div>
-  </div>
 
-  <button class="btn btn-primary" id="btnConfirm">Подтвердить сборку</button>
+    <div class="card section">
+      <h2>Код маркировки «Честный знак»</h2>
+      <div class="mark-row">
+        <select class="input" id="itemSelect" style="max-width:260px"></select>
+        <input class="input" id="markInput" data-scan placeholder="Скан кода…" style="font-family:var(--mono)" />
+      </div>
+      <div class="mark-list" id="markList"></div>
+    </div>
+
+    <button class="btn btn-primary" id="btnConfirm">Подтвердить сборку</button>
+  </div>
 
   <script src="/js/sidebar.js"></script>
   <script>
@@ -67,12 +78,66 @@
 
     let order = null;
 
+    // Заказы, готовые к сборке (совпадает со статусами кнопки «Сборка» в orders.html).
+    const PICK_STATUS_LABELS = {
+      confirmed: ['Подтверждён', 'badge-blue'],
+      in_assembly: ['В сборке', 'badge-orange'],
+    };
+
+    // «1 позиция / 2 позиции / 5 позиций» — по образцу fbs/orders.html.
+    function plural(n, one, few, many) {
+      const d10 = n % 10;
+      const d100 = n % 100;
+      if (d10 === 1 && d100 !== 11) return one;
+      if (d10 >= 2 && d10 <= 4 && (d100 < 12 || d100 > 14)) return few;
+      return many;
+    }
+
     async function loadOrder() {
-      order = await Fulfil.api('GET', `/fbs/orders/${orderId}`);
-      const sel = document.getElementById('itemSelect');
-      sel.innerHTML = order.items
-        .map((it) => `<option value="${it.id}">${Fulfil.esc(it.barcode)} × ${it.qty}</option>`)
-        .join('');
+      try {
+        order = await Fulfil.api('GET', `/fbs/orders/${orderId}`);
+        const sel = document.getElementById('itemSelect');
+        sel.innerHTML = order.items
+          .map((it) => `<option value="${it.id}">${Fulfil.esc(it.barcode)} × ${it.qty}</option>`)
+          .join('');
+      } catch (err) {
+        Fulfil.toast(Fulfil.errorText(err), 'error');
+      }
+    }
+
+    // orderId не задан (клик по вкладке меню) — показываем список заказов на сборку.
+    async function loadOrderPicker() {
+      const el = document.getElementById('orderPicker');
+      el.innerHTML = '<div class="empty-state">Загрузка…</div>';
+      try {
+        const orders = await Fulfil.api('GET', '/fbs/orders');
+        const ready = (orders || []).filter(
+          (o) => o.status === 'confirmed' || o.status === 'in_assembly'
+        );
+        if (!ready.length) {
+          el.innerHTML =
+            '<div class="empty-state">Нет заказов, готовых к сборке. ' +
+            'Возьмите заказ в работу на вкладке «Заказы ФБС».' +
+            '<br /><a class="btn" href="/fbs/orders.html">Перейти к заказам ФБС</a></div>';
+          return;
+        }
+        el.innerHTML =
+          '<div class="page-sub">Выберите заказ для сборки.</div>' +
+          ready
+            .map((o) => {
+              const [label, cls] = PICK_STATUS_LABELS[o.status] || [o.status, 'badge-muted'];
+              const n = o.items.length;
+              return `
+          <a class="list-card" href="?orderId=${o.id}">
+            <div class="order-id">${Fulfil.esc(o.wbOrderId)}</div>
+            <span class="badge ${cls}">${label}</span>
+            <div class="list-card__meta">${n} ${plural(n, 'позиция', 'позиции', 'позиций')}</div>
+          </a>`;
+            })
+            .join('');
+      } catch (err) {
+        el.innerHTML = `<div class="empty-state">${Fulfil.esc(Fulfil.errorText(err))}</div>`;
+      }
     }
 
     async function loadPickList() {
@@ -132,8 +197,14 @@
       }
     });
 
-    loadOrder();
-    loadPickList();
+    if (orderId) {
+      document.getElementById('orderDetails').hidden = false;
+      loadOrder();
+      loadPickList();
+    } else {
+      document.getElementById('orderPicker').hidden = false;
+      loadOrderPicker();
+    }
   </script>
 </body>
 </html>

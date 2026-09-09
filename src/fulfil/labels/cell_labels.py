@@ -39,7 +39,7 @@ def render_cell_labels_pdf(cells: list[Cell], size: str = "58x40") -> bytes:
         c.setFont("Helvetica-Bold", 10)
         c.drawCentredString(width / 2, height - 10, cell.address)
 
-        png_bytes = _barcode_png(cell.barcode)
+        png_bytes = _barcode_png(cell.address)
         img = io.BytesIO(png_bytes)
         from reportlab.lib.utils import ImageReader
 
@@ -57,7 +57,7 @@ def render_cell_labels_pdf(cells: list[Cell], size: str = "58x40") -> bytes:
         )
 
         c.setFont("Helvetica", 8)
-        c.drawCentredString(width / 2, height * 0.15, cell.barcode)
+        c.drawCentredString(width / 2, height * 0.15, cell.address)
 
         c.showPage()
         c.setPageSize((width, height))

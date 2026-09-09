@@ -103,6 +103,34 @@ def test_cell_barcode_format():
     assert format_cell_barcode(123) == "CELL-000123"
 
 
+def _tiny_png() -> bytes:
+    """Минимальный валидный PNG для reportlab.ImageReader — рендер штрихкода при этом
+    не запускается (B.3: проверяем, что кодируется адрес, а не сам PNG)."""
+    import io
+
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new("RGB", (1, 1), "white").save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def test_render_cell_labels_encodes_address(db, monkeypatch):
+    """Новые этикетки кодируют человекочитаемый адрес A-1-1-1, а не CELL-000001."""
+    import fulfil.labels.cell_labels as cell_labels
+
+    [cell] = generate_cells(db, "A", racks=1, cells_per_rack=1)
+    png = _tiny_png()
+    captured: list[str] = []
+    monkeypatch.setattr(
+        cell_labels, "_barcode_png", lambda value: captured.append(value) or png
+    )
+
+    cell_labels.render_cell_labels_pdf([cell])
+
+    assert captured == [cell.address] == ["A-1-1-1"]
+
+
 def test_resolve_location_by_barcode_or_address(db):
     [cell] = generate_cells(db, "A", racks=1, cells_per_rack=1)
 

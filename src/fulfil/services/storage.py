@@ -602,6 +602,33 @@ def find_free_cell_suggestions(db: Session, zone_code: str | None = None, limit:
     return [{"address": c.address, "barcode": c.barcode} for c in db.scalars(stmt)]
 
 
+def get_cell_contents(db: Session, cell: Cell) -> list[dict]:
+    """Содержимое места: товары с положительным остатком в этой ячейке (C.1).
+    Join stock_by_cell → products по cell_id, только qty > 0, сортировка по названию."""
+    rows = db.execute(
+        select(
+            Product.id,
+            Product.name,
+            Product.barcode,
+            Product.image_url,
+            StockByCell.qty,
+        )
+        .join(StockByCell, StockByCell.product_id == Product.id)
+        .where(StockByCell.cell_id == cell.id, StockByCell.qty > 0)
+        .order_by(Product.name)
+    ).all()
+    return [
+        {
+            "productId": r.id,
+            "productName": r.name,
+            "barcode": r.barcode,
+            "imageUrl": r.image_url,
+            "qty": r.qty,
+        }
+        for r in rows
+    ]
+
+
 def get_cell_map(db: Session) -> dict:
     """Строится ОТ зон (не от ячеек) — пустая зона видна сразу после создания
     (FEATURES-PLAN.md, дефект №6). Порядок зон — position, id: новая всегда последняя."""
@@ -627,6 +654,20 @@ def get_cell_map(db: Session) -> dict:
             .order_by(Cell.cell_no)
         )
     ) if shelves else []
+
+    # Остаток по всем местам карты — ОДНИМ агрегирующим запросом (C.1), без N+1:
+    # карта тянет все места сразу. Места без остатка → qty: 0.
+    cell_ids = [c.id for c in cells]
+    qty_by_cell: dict[int, int] = {}
+    if cell_ids:
+        qty_by_cell = {
+            cid: int(total or 0)
+            for cid, total in db.execute(
+                select(StockByCell.cell_id, func.sum(StockByCell.qty))
+                .where(StockByCell.cell_id.in_(cell_ids))
+                .group_by(StockByCell.cell_id)
+            ).all()
+        }
 
     cells_by_shelf: dict[int, list[Cell]] = {}
     for c in cells:
@@ -658,6 +699,7 @@ def get_cell_map(db: Session) -> dict:
                                         "id": cell.id,
                                         "address": cell.address,
                                         "barcode": cell.barcode,
+                                        "qty": qty_by_cell.get(cell.id, 0),
                                         "status": cell.status.value,
                                         "blockedReason": cell.blocked_reason,
                                         "zoneCode": cell.zone_code,

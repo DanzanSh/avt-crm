@@ -17,19 +17,20 @@
       color: var(--text-2);
       font-family: var(--font);
       cursor: pointer;
-      font-size: 13px;
+      font-size: 16px;
+      font-weight: 600;
     }
     .tab-btn:hover { background: var(--row-hover); }
     .tab-btn.active { background: var(--blue); color: #fff; border-color: transparent; }
     .stock-summary { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 18px; }
     .stock-summary .stat-card { min-width: 180px; }
-    .oversold { color: var(--red); font-size: 12px; margin-top: 2px; }
+    .oversold { color: var(--red); font-size: 14px; margin-top: 2px; }
     /* Внутренняя таблица по ячейкам: колонки по содержимому, а не на всю ширину. */
     .by-cell-table { width: auto; margin-top: 4px; }
     .by-cell-table td { padding: 6px 8px; border-bottom: none; white-space: nowrap; }
     .by-cell-table td:first-child { padding-left: 0; }
     .by-cell-table tr:hover { background: none; }
-    .btn-sm { padding: 4px 10px; font-size: 12px; min-height: unset; }
+    .btn-sm { padding: 4px 10px; font-size: 14px; min-height: unset; }
     .row-toggle { cursor: pointer; }
     .row-toggle .chevron { display: inline-block; transition: transform .15s; margin-right: 4px; color: var(--muted); }
     .row-toggle.open .chevron { transform: rotate(90deg); }
