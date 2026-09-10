@@ -5,7 +5,12 @@
  * Оформление — по макету framer-export/component-Navigation.json: 196px, плоский
  * список без заголовков секций (порядок в PAGES уже совпадает с макетом), шапка
  * с фирменным знаком. Секции приходят с бэкенда и остаются в данных — просто
- * не рисуются. */
+ * не рисуются.
+ *
+ * Каркас (обёртка контента + панель) строится СИНХРОННО, до сетевого запроса —
+ * иначе между загрузкой страницы и ответом API контент успевает отрисоваться
+ * без раскладки (голые flex-элементы в ряд), а потом «прыгает» на место. Список
+ * ссылок — единственное, что ждёт ответа: он дорисовывается в готовую панель. */
 (function () {
   'use strict';
 
@@ -16,44 +21,13 @@
     '<path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4' +
     'a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/></svg>';
 
-  function build(pages) {
-    const wrapper = document.createElement('div');
-    wrapper.className = 'sb-content';
-    while (document.body.firstChild) {
-      wrapper.appendChild(document.body.firstChild);
-    }
-
-    const nav = document.createElement('nav');
-    nav.className = 'sb-nav';
-
-    let html =
-      '<div class="sb-brand">' +
-        '<span class="sb-mark">' + MARK + '</span>' +
-        '<span class="sb-brand-name">AVT fulfil</span>' +
-      '</div>';
-
-    pages.forEach((p) => {
-      const active = location.pathname === p.href ? ' active' : '';
-      html += `<a class="sb-link${active}" href="${p.href}">${Fulfil.esc(p.label)}</a>`;
-    });
-
-    html += '<button class="sb-logout" id="sbLogout">Выйти</button>';
-    nav.innerHTML = html;
-
-    document.body.appendChild(nav);
-    document.body.appendChild(wrapper);
-    document.body.classList.add('sb-ready');
-
-    document.getElementById('sbLogout').addEventListener('click', () => Fulfil.logout());
-  }
-
   const style = document.createElement('style');
   style.textContent = `
     body { display: flex; min-height: 100vh; }
     .sb-nav {
       width: 196px;
       flex: none;
-      background: var(--card);
+      background: var(--bg);
       border-right: 1px solid var(--border);
       padding: 20px 14px;
       display: flex;
@@ -120,8 +94,43 @@
   `;
   document.head.appendChild(style);
 
+  // ── Каркас: синхронно, в том же кадре, что и инъекция стилей ────────
+  const wrapper = document.createElement('div');
+  wrapper.className = 'sb-content';
+  while (document.body.firstChild) {
+    wrapper.appendChild(document.body.firstChild);
+  }
+
+  const nav = document.createElement('nav');
+  nav.className = 'sb-nav';
+  nav.innerHTML =
+    '<div class="sb-brand">' +
+      '<span class="sb-mark">' + MARK + '</span>' +
+      '<span class="sb-brand-name">AVT fulfil</span>' +
+    '</div>' +
+    '<button class="sb-logout" id="sbLogout">Выйти</button>';
+
+  document.body.appendChild(nav);
+  document.body.appendChild(wrapper);
+  document.body.classList.add('sb-ready');
+
+  document.getElementById('sbLogout').addEventListener('click', () => Fulfil.logout());
+
+  // ── Ссылки: дорисовываются между шапкой и «Выйти», когда придёт карта ─
+  function fillLinks(pages) {
+    const logout = document.getElementById('sbLogout');
+    nav.querySelectorAll('.sb-link').forEach((el) => el.remove());
+    pages.forEach((p) => {
+      const a = document.createElement('a');
+      a.className = 'sb-link' + (location.pathname === p.href ? ' active' : '');
+      a.href = p.href;
+      a.textContent = p.label;
+      nav.insertBefore(a, logout);
+    });
+  }
+
   Fulfil.requireAuth();
   Fulfil.api('GET', '/settings/pages')
-    .then(build)
-    .catch(() => build([]));
+    .then(fillLinks)
+    .catch(() => fillLinks([]));
 })();
