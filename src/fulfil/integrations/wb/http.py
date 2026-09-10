@@ -14,11 +14,37 @@ import httpx
 
 from fulfil.config import get_settings
 from fulfil.db import SessionLocal
+from fulfil.errors import WbApiError
 from fulfil.integrations.wb.base import WbCardsPage, WbCursor, WbOrder, WbSticker
 from fulfil.models.wb_log import WbApiLog
 
 _MAX_RETRIES = 3
 _BACKOFF_BASE_SEC = 0.5
+
+_WB_HINTS = {
+    401: "Токен WB (WB_API_TOKEN) истёк или не подходит — обновите его в настройках.",
+    403: "У токена WB не хватает прав (категории/scope) для этого запроса.",
+    404: "WB не нашёл ресурс по этому пути — вероятно, изменился контракт API.",
+    429: "WB временно ограничил частоту запросов — повторите синхронизацию через минуту.",
+}
+
+
+def _as_wb_error(method: str, path: str, exc: Exception) -> WbApiError:
+    """Переводит любую сетевую ошибку клиента WB в доменный WbApiError, чтобы
+    ручка отдала внятный конверт, а не 500 со стектрейсом httpx."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        code = exc.response.status_code
+        body = (exc.response.text or "").strip().replace("\n", " ")
+        if len(body) > 300:
+            body = body[:300] + "…"
+        detail = f"Wildberries API вернул {code} на {method} {path}."
+        if body:
+            detail += f" Ответ: {body}"
+        return WbApiError(detail, upstream_status=code, what_to_do=_WB_HINTS.get(code))
+    return WbApiError(
+        f"Не удалось получить ответ от Wildberries API ({method} {path}): {exc}.",
+        what_to_do="WB недоступен или таймаут — повторите синхронизацию позже.",
+    )
 
 
 def _card_color(card: dict) -> str:
@@ -74,6 +100,11 @@ class WBHttpClient:
         return {"Authorization": self._token, "Content-Type": "application/json"}
 
     def _request(self, method: str, path: str, *, base: str | None = None, **kwargs) -> httpx.Response:
+        if not self._token:
+            raise WbApiError(
+                "Не задан токен Wildberries (WB_API_TOKEN) — запрос к WB невозможен.",
+                what_to_do="Пропишите действующий токен WB в настройках сервера и перезапустите его.",
+            )
         url = f"{(base or self._base)}{path}"
         last_exc: Exception | None = None
         for attempt in range(_MAX_RETRIES):
@@ -92,14 +123,21 @@ class WBHttpClient:
             except httpx.HTTPError as exc:
                 error = str(exc)
                 last_exc = exc
-                if attempt < _MAX_RETRIES - 1:
+                # 4xx (кроме 429) — контракт/токен, ретрай не поможет: падаем сразу.
+                client_error = (
+                    isinstance(exc, httpx.HTTPStatusError)
+                    and 400 <= exc.response.status_code < 500
+                    and exc.response.status_code != 429
+                )
+                if not client_error and attempt < _MAX_RETRIES - 1:
                     time.sleep(_BACKOFF_BASE_SEC * (2**attempt))
                     continue
+                break
             finally:
                 duration_ms = int((time.monotonic() - started) * 1000)
                 self._log(method, path, status_code, duration_ms, error)
         assert last_exc is not None
-        raise last_exc
+        raise _as_wb_error(method, path, last_exc) from last_exc
 
     @staticmethod
     def _log(method: str, path: str, status: int | None, duration_ms: int, error: str | None) -> None:

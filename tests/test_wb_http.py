@@ -4,6 +4,10 @@
 старый маппинг падал с AttributeError: 'list' object has no attribute 'get'.
 """
 
+import httpx
+import pytest
+
+from fulfil.errors import WbApiError
 from fulfil.integrations.wb.http import WBHttpClient
 
 
@@ -56,6 +60,67 @@ def test_get_product_cards_parses_live_shape(monkeypatch):
     assert second["imageUrl"] == ""
 
     assert page["cursor"] == {"updatedAt": "2026-02-01T00:00:00Z", "nmID": 100501, "total": 2}
+
+
+class _FakeHttpxClient:
+    """Заглушка httpx.Client: всегда отдаёт заранее заданный Response."""
+
+    def __init__(self, response):
+        self._response = response
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def request(self, method, url, **kw):
+        self._response.request = httpx.Request(method, url)
+        return self._response
+
+
+def test_request_converts_wb_4xx_to_wb_api_error(monkeypatch):
+    """Регресс: 401 от WB долетал до FastAPI голым 500 со стектрейсом httpx.
+    Теперь — доменный WbApiError (→ конверт 502) с кодом ответа и подсказкой."""
+    resp = httpx.Response(401, text='{"errors":["invalid token"]}')
+    monkeypatch.setattr(httpx, "Client", lambda *a, **kw: _FakeHttpxClient(resp))
+    monkeypatch.setattr(WBHttpClient, "_log", staticmethod(lambda *a, **kw: None))
+
+    client = WBHttpClient()
+    client._token = "test-token"  # не зависим от .env
+    with pytest.raises(WbApiError) as ei:
+        client.get_product_cards()
+
+    err = ei.value
+    assert err.status_code == 502
+    assert err.reason_code == "wb_api_error"
+    assert err.extra["upstreamStatus"] == 401
+    assert "401" in err.detail and "invalid token" in err.detail
+
+
+def test_request_converts_network_error_to_wb_api_error(monkeypatch):
+    def _boom(*a, **kw):
+        raise httpx.ConnectError("connection refused")
+
+    monkeypatch.setattr(httpx, "Client", _boom)
+    monkeypatch.setattr(WBHttpClient, "_log", staticmethod(lambda *a, **kw: None))
+    monkeypatch.setattr("fulfil.integrations.wb.http.time.sleep", lambda *_: None)
+
+    client = WBHttpClient()
+    client._token = "test-token"  # не зависим от .env
+    with pytest.raises(WbApiError) as ei:
+        client.get_product_cards()
+    assert ei.value.extra["upstreamStatus"] is None
+
+
+def test_request_without_token_fails_fast(monkeypatch):
+    client = WBHttpClient()
+    client._token = ""
+    monkeypatch.setattr(httpx, "Client", lambda *a, **kw: pytest.fail("не должно дойти до сети"))
+    with pytest.raises(WbApiError) as ei:
+        client.get_product_cards()
+    assert ei.value.extra["upstreamStatus"] is None
+    assert "WB_API_TOKEN" in ei.value.detail
 
 
 def test_get_product_cards_sends_content_base_and_incremental_cursor(monkeypatch):

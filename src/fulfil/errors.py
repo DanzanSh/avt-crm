@@ -67,6 +67,31 @@ class BarcodeNotAllowedError(AppError):
         )
 
 
+class WbApiError(AppError):
+    """502 — Wildberries Seller API ответил ошибкой или недоступен.
+
+    Раньше `httpx.HTTPStatusError` из клиента WB долетал до FastAPI как голый
+    500 со стектрейсом; оператор не понимал, что делать. Теперь — внятный
+    конверт с кодом ответа WB и подсказкой.
+    """
+
+    def __init__(
+        self,
+        detail: str,
+        *,
+        upstream_status: int | None = None,
+        what_to_do: str | None = None,
+    ):
+        super().__init__(
+            detail,
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            reason_code="wb_api_error",
+            what_to_do=what_to_do
+            or "Проверьте токен и режим WB в настройках и повторите синхронизацию позже.",
+            extra={"upstreamStatus": upstream_status},
+        )
+
+
 class NotFoundError(AppError):
     def __init__(self, detail: str):
         super().__init__(
