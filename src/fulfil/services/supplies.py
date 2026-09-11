@@ -8,12 +8,13 @@ from sqlalchemy.orm import Session
 
 from fulfil.errors import AppError
 from fulfil.integrations.wb.base import WBClient
+from fulfil.models.client import Client
 from fulfil.models.fbs import Order, Supply, SupplyBox, SupplyStatus
 
 
-def create_supply(db: Session, wb_client: WBClient) -> Supply:
+def create_supply(db: Session, client: Client, wb_client: WBClient) -> Supply:
     wb_supply_id = wb_client.create_supply()
-    supply = Supply(wb_supply_id=wb_supply_id, status=SupplyStatus.OPEN)
+    supply = Supply(client_id=client.id, wb_supply_id=wb_supply_id, status=SupplyStatus.OPEN)
     db.add(supply)
     db.commit()
     db.refresh(supply)
@@ -26,6 +27,12 @@ def add_order_to_supply(db: Session, supply: Supply, order: Order, wb_client: WB
             f'Поставка в статусе "{supply.status.value}" — заказ добавить нельзя.',
             status_code=409,
             reason_code="wrong_status",
+        )
+    if order.client_id != supply.client_id:
+        raise AppError(
+            "Заказ и поставка принадлежат разным клиентам — добавить нельзя.",
+            status_code=409,
+            reason_code="client_mismatch",
         )
     wb_client.add_order_to_supply(supply.wb_supply_id, order.wb_order_id)
     order.supply_id = supply.id

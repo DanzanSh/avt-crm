@@ -5,8 +5,8 @@ from fulfil.services.receiving import place_stock
 from fulfil.services.storage import generate_cells
 
 
-def _make_product(db, barcode="2000000000017", name="Майка белая") -> Product:
-    p = Product(barcode=barcode, name=name)
+def _make_product(db, seller, barcode="2000000000017", name="Майка белая") -> Product:
+    p = Product(client_id=seller.id, barcode=barcode, name=name)
     db.add(p)
     db.commit()
     db.refresh(p)
@@ -14,7 +14,7 @@ def _make_product(db, barcode="2000000000017", name="Майка белая") -> 
 
 
 def _make_order(db, product: Product, qty: int) -> Order:
-    order = Order(wb_order_id="WB-1", status=OrderStatus.CONFIRMED)
+    order = Order(client_id=product.client_id, wb_order_id="WB-1", status=OrderStatus.CONFIRMED)
     db.add(order)
     db.flush()
     db.add(OrderItem(order_id=order.id, product_id=product.id, barcode=product.barcode, qty=qty))
@@ -23,10 +23,10 @@ def _make_order(db, product: Product, qty: int) -> Order:
     return order
 
 
-def test_pick_list_drains_first_cell_before_next_not_50_50(db):
+def test_pick_list_drains_first_cell_before_next_not_50_50(db, seller):
     """Инвариант из DEV-PLAN.md: остаток 75 в A-1-10 и 175 в B-5-5, заказ на 100 —
     строки должны быть 75 + 25, а НЕ 50/50."""
-    product = _make_product(db)
+    product = _make_product(db, seller)
     cells_a = generate_cells(db, "A", racks=1, cells_per_rack=10)
     cell_a110 = next(c for c in cells_a if c.address == "A-1-1-10")
     cells_b = generate_cells(db, "B", racks=5, cells_per_rack=5)
@@ -43,10 +43,10 @@ def test_pick_list_drains_first_cell_before_next_not_50_50(db):
     assert by_cell[cell_b55.id] == 25
 
 
-def test_pick_list_route_order_is_numeric_not_lexicographic(db):
+def test_pick_list_route_order_is_numeric_not_lexicographic(db, seller):
     """A-1-2 должна идти раньше A-1-10 — строковая сортировка сломала бы это
     ('10' < '2' лексикографически)."""
-    product = _make_product(db)
+    product = _make_product(db, seller)
     cells = generate_cells(db, "A", racks=1, cells_per_rack=10)
     cell_2 = next(c for c in cells if c.address == "A-1-1-2")
     cell_10 = next(c for c in cells if c.address == "A-1-1-10")
@@ -61,8 +61,8 @@ def test_pick_list_route_order_is_numeric_not_lexicographic(db):
     assert [line.cell_id for line in lines] == [cell_2.id, cell_10.id]
 
 
-def test_commit_pick_lines_decrements_stock(db):
-    product = _make_product(db)
+def test_commit_pick_lines_decrements_stock(db, seller):
+    product = _make_product(db, seller)
     [cell] = generate_cells(db, "A", racks=1, cells_per_rack=1)
     place_stock(db, product, cell, 50)
 

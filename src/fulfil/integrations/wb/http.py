@@ -21,15 +21,18 @@ from fulfil.models.wb_log import WbApiLog
 _MAX_RETRIES = 3
 _BACKOFF_BASE_SEC = 0.5
 
-_WB_HINTS = {
-    401: "Токен WB (WB_API_TOKEN) истёк или не подходит — обновите его в настройках.",
-    403: "У токена WB не хватает прав (категории/scope) для этого запроса.",
-    404: "WB не нашёл ресурс по этому пути — вероятно, изменился контракт API.",
-    429: "WB временно ограничил частоту запросов — повторите синхронизацию через минуту.",
-}
+
+def _wb_hints(client_name: str | None) -> dict:
+    who = f'клиента «{client_name}»' if client_name else "клиента"
+    return {
+        401: f"Ключ API {who} истёк или не подходит — обновите его в разделе «Клиенты».",
+        403: f"У ключа API {who} не хватает прав (нужны категории «Контент» и «Маркетплейс»).",
+        404: "WB не нашёл ресурс по этому пути — вероятно, изменился контракт API.",
+        429: "WB временно ограничил частоту запросов — повторите синхронизацию через минуту.",
+    }
 
 
-def _as_wb_error(method: str, path: str, exc: Exception) -> WbApiError:
+def _as_wb_error(method: str, path: str, exc: Exception, client_name: str | None = None) -> WbApiError:
     """Переводит любую сетевую ошибку клиента WB в доменный WbApiError, чтобы
     ручка отдала внятный конверт, а не 500 со стектрейсом httpx."""
     if isinstance(exc, httpx.HTTPStatusError):
@@ -40,7 +43,7 @@ def _as_wb_error(method: str, path: str, exc: Exception) -> WbApiError:
         detail = f"Wildberries API вернул {code} на {method} {path}."
         if body:
             detail += f" Ответ: {body}"
-        return WbApiError(detail, upstream_status=code, what_to_do=_WB_HINTS.get(code))
+        return WbApiError(detail, upstream_status=code, what_to_do=_wb_hints(client_name).get(code))
     return WbApiError(
         f"Не удалось получить ответ от Wildberries API ({method} {path}): {exc}.",
         what_to_do="WB недоступен или таймаут — повторите синхронизацию позже.",
@@ -75,26 +78,46 @@ def _first_dict(seq) -> dict:
     return {}
 
 
-def _first_sku(card: dict) -> str:
-    skus = _first_dict(card.get("sizes")).get("skus")
-    return skus[0] if isinstance(skus, list) and skus else ""
-
-
-def _first_size(card: dict) -> str:
-    return _first_dict(card.get("sizes")).get("techSize", "") or ""
-
-
 def _first_photo(card: dict) -> str:
     return _first_dict(card.get("photos")).get("big", "") or ""
 
 
+def _card_sizes(card: dict) -> list[dict]:
+    """Разворачивает sizes[] карточки в отдельные записи товаров (Этап 1, п.1.1:
+    товар = размер карточки, а не карточка целиком). Размер без skus (ещё не привязан
+    штрихкод в личном кабинете WB) пропускается — на него нельзя ни принять, ни продать."""
+    sizes = card.get("sizes")
+    if not isinstance(sizes, list):
+        return []
+    out = []
+    for size in sizes:
+        if not isinstance(size, dict):
+            continue
+        skus = size.get("skus")
+        if not isinstance(skus, list) or not skus:
+            continue
+        out.append(
+            {
+                "chrtId": size.get("chrtID"),
+                "barcode": skus[0],
+                "size": size.get("techSize", "") or "",
+            }
+        )
+    return out
+
+
 class WBHttpClient:
-    def __init__(self) -> None:
+    """Токен и client_id теперь приходят от вызывающей стороны (один экземпляр на
+    вызов — см. integrations/wb/__init__.get_wb_client), а не из глобальных settings:
+    у каждого клиента фулфилмента свой кабинет WB со своим ключом (Этап 1)."""
+
+    def __init__(self, token: str, *, client_id: int | None = None, client_name: str | None = None) -> None:
         settings = get_settings()
         self._base = settings.wb_api_base.rstrip("/")
         self._content_base = settings.wb_content_api_base.rstrip("/")
-        self._token = settings.wb_api_token
-        self._warehouse_id = settings.wb_warehouse_id
+        self._token = token
+        self._client_id = client_id
+        self._client_name = client_name
 
     def _headers(self) -> dict:
         return {"Authorization": self._token, "Content-Type": "application/json"}
@@ -102,8 +125,8 @@ class WBHttpClient:
     def _request(self, method: str, path: str, *, base: str | None = None, **kwargs) -> httpx.Response:
         if not self._token:
             raise WbApiError(
-                "Не задан токен Wildberries (WB_API_TOKEN) — запрос к WB невозможен.",
-                what_to_do="Пропишите действующий токен WB в настройках сервера и перезапустите его.",
+                "У клиента не задан ключ API — запрос к WB невозможен.",
+                what_to_do="Введите ключ API в разделе «Клиенты».",
             )
         url = f"{(base or self._base)}{path}"
         last_exc: Exception | None = None
@@ -135,16 +158,20 @@ class WBHttpClient:
                 break
             finally:
                 duration_ms = int((time.monotonic() - started) * 1000)
-                self._log(method, path, status_code, duration_ms, error)
+                self._log(method, path, status_code, duration_ms, error, client_id=self._client_id)
         assert last_exc is not None
-        raise _as_wb_error(method, path, last_exc) from last_exc
+        raise _as_wb_error(method, path, last_exc, client_name=self._client_name) from last_exc
 
     @staticmethod
-    def _log(method: str, path: str, status: int | None, duration_ms: int, error: str | None) -> None:
+    def _log(
+        method: str, path: str, status: int | None, duration_ms: int, error: str | None,
+        *, client_id: int | None = None,
+    ) -> None:
         db = SessionLocal()
         try:
             db.add(
                 WbApiLog(
+                    client_id=client_id,
                     method=method,
                     path=path,
                     status=status,
@@ -155,6 +182,19 @@ class WBHttpClient:
             db.commit()
         finally:
             db.close()
+
+    # --- Диагностика (Этап 1, «Проверить подключение») ---
+    def ping(self) -> dict:
+        """Best-effort: у каждого API-хоста WB есть /ping, не требующий прав сверх
+        авторизации. Ошибка на одном хосте не мешает проверить второй."""
+        result: dict = {}
+        for name, base in (("marketplace", self._base), ("content", self._content_base)):
+            try:
+                self._request("GET", "/ping", base=base)
+                result[name] = {"ok": True, "error": None}
+            except WbApiError as exc:
+                result[name] = {"ok": False, "error": exc.detail}
+        return result
 
     # --- Каталог ---
     def get_product_cards(self, cursor: WbCursor | None = None) -> WbCardsPage:
@@ -173,20 +213,19 @@ class WBHttpClient:
             "POST", "/content/v2/get/cards/list", base=self._content_base, json=body
         )
         data = resp.json()
-        cards = [
-            {
+        cards = []
+        for c in data.get("cards", []):
+            common = {
                 "nmId": c.get("nmID"),
                 "imtId": c.get("imtID"),
                 "vendorCode": c.get("vendorCode", ""),
-                "barcode": _first_sku(c),
                 "name": c.get("title", ""),
                 "brand": c.get("brand", ""),
-                "size": _first_size(c),
                 "color": _card_color(c),
                 "imageUrl": _first_photo(c),
             }
-            for c in data.get("cards", [])
-        ]
+            for size in _card_sizes(c):
+                cards.append({**common, **size})
         c = data.get("cursor") or {}
         next_cursor: WbCursor = {
             "updatedAt": c.get("updatedAt"),

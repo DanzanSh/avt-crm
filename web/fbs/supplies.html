@@ -20,6 +20,8 @@
     <button class="btn btn-primary" id="btnCreate">+ Новая поставка</button>
   </div>
 
+  <div id="clientFilterMount" style="margin-bottom:14px;"></div>
+
   <div id="list">Загрузка…</div>
 
   <script src="/js/sidebar.js"></script>
@@ -35,7 +37,8 @@
     async function load() {
       const list = document.getElementById('list');
       try {
-        const supplies = await Fulfil.api('GET', '/fbs/supplies');
+        const q = Fulfil.clientFilter.clientId ? `?client_id=${Fulfil.clientFilter.clientId}` : '';
+        const supplies = await Fulfil.api('GET', '/fbs/supplies' + q);
         if (!supplies.length) {
           list.innerHTML = '<div class="empty-state">Поставок пока нет</div>';
           return;
@@ -48,6 +51,7 @@
             return `
           <div class="list-card" data-id="${s.id}">
             <div class="supply-id">${Fulfil.esc(s.wbSupplyId || '—')}</div>
+            <span class="badge badge-muted">${Fulfil.esc(s.clientName || '')}</span>
             <span class="badge ${cls}">${label}</span>
             <div class="supply-actions">
               ${canClose ? `<button class="btn btn-close" data-id="${s.id}">Закрыть поставку</button>` : ''}
@@ -68,8 +72,31 @@
     }
 
     document.getElementById('btnCreate').addEventListener('click', async () => {
+      let clients = [];
       try {
-        await Fulfil.api('POST', '/fbs/supplies');
+        clients = await Fulfil.api('GET', '/clients');
+      } catch (err) {
+        Fulfil.toast(Fulfil.errorText(err), 'error');
+        return;
+      }
+      if (!clients.length) {
+        Fulfil.toast('Сначала добавьте клиента в разделе «Клиенты»', 'error');
+        return;
+      }
+      const values = await Fulfil.formModal({
+        title: 'Новая поставка',
+        submitLabel: 'Создать',
+        fields: [
+          {
+            id: 'clientId', label: 'Клиент', type: 'select', required: true,
+            value: Fulfil.clientFilter.clientId || clients[0].id,
+            options: clients.map((c) => ({ value: c.id, label: c.name })),
+          },
+        ],
+      });
+      if (!values) return;
+      try {
+        await Fulfil.api('POST', '/fbs/supplies', { clientId: Number(values.clientId) });
         Fulfil.toast('Поставка создана');
         load();
       } catch (err) {
@@ -99,9 +126,13 @@
     }
 
     async function showBoxes(id) {
-      const amountStr = prompt('Сколько коробов?', '1');
-      if (!amountStr) return;
-      const amount = Number(amountStr);
+      const values = await Fulfil.formModal({
+        title: 'Короба поставки',
+        submitLabel: 'Напечатать',
+        fields: [{ id: 'amount', label: 'Сколько коробов?', type: 'number', min: 1, value: 1, required: true }],
+      });
+      if (!values) return;
+      const amount = Number(values.amount);
       if (!amount || amount <= 0) return;
       const area = document.getElementById('qr-' + id);
       try {
@@ -114,7 +145,7 @@
       }
     }
 
-    load();
+    Fulfil.clientFilter.mount(document.getElementById('clientFilterMount'), load).then(load);
   </script>
 </body>
 </html>

@@ -7,10 +7,15 @@
   <link rel="stylesheet" href="/css/theme.css" />
   <script src="/js/core.js"></script>
   <style>
-    .toolbar { display: flex; gap: 8px; flex-wrap: wrap; }
-    .search-row { display: flex; gap: 12px; align-items: center; margin-bottom: 18px; flex-wrap: wrap; }
+    /* .toolbar и .archived-toggle — общие, вынесены в theme.css. */
+    .search-row { display: flex; gap: 12px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
     .search-row .search-field { flex: 1 1 320px; }
-    .archived-toggle { font-size: 15px; color: var(--text-2); display: flex; align-items: center; gap: 6px; }
+    /* 3.1 — фильтры каталога отдельной строкой под поиском: четыре независимых
+       списка в порядке товар → размер → цвет → бренд. Ширина как в stock.html:
+       не растягиваться на всю строку, но и не сжиматься до нечитаемого. */
+    .filters-row { display: flex; gap: 8px; align-items: center; margin-bottom: 18px; flex-wrap: wrap; }
+    .filters-row .input { width: auto; flex: 0 1 210px; min-width: 150px; }
+    .filters-row .btn { flex: none; }
     .manual-mark { font-size: 12px; color: var(--orange); border: 1px solid currentColor; border-radius: 3px; padding: 0 3px; margin-left: 4px; }
     .archived-row { opacity: .55; }
     .product-name { font-size: 18px; font-weight: 600; line-height: 1.2; color: var(--text); }
@@ -73,6 +78,7 @@
   </div>
 
   <div class="search-row">
+    <div id="clientFilterMount"></div>
     <div class="search-field">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -85,6 +91,16 @@
     </label>
   </div>
 
+  <!-- Подпись поля вшита в первый пункт («Товар: все»), чтобы не заводить
+       отдельные лейблы и не удваивать высоту строки. -->
+  <div class="filters-row">
+    <select class="input" id="filterName"><option value="">Товар: все</option></select>
+    <select class="input" id="filterSize"><option value="">Размер: все</option></select>
+    <select class="input" id="filterColor"><option value="">Цвет: все</option></select>
+    <select class="input" id="filterBrand"><option value="">Бренд: все</option></select>
+    <button class="btn" id="btnResetFilters" hidden>Сбросить фильтры</button>
+  </div>
+
   <div id="body">Загрузка…</div>
 
   <div class="modal-overlay" id="editModal">
@@ -94,6 +110,7 @@
   <div class="modal-overlay" id="newModal">
     <form class="modal" id="newForm">
       <h2>Новый товар</h2>
+      <div class="field-row"><select class="input" id="newClientId" required></select></div>
       <div class="field-row"><input class="input" id="newBarcode" placeholder="Баркод (GTIN или LDX-XXXXXX)" required /></div>
       <div class="field-row"><input class="input" id="newName" placeholder="Название" required /></div>
       <div class="field-row"><input class="input" id="newBrand" placeholder="Бренд" /></div>
@@ -113,15 +130,71 @@
     let currentSearch = '';
     let showArchived = false;
 
+    // 3.1 — фильтры каталога. Порядок массива = порядок списков в интерфейсе;
+    // поле совпадает с именем query-параметра и ключом в /products/filter-options.
+    const FILTERS = [
+      { field: 'name', el: 'filterName', label: 'Товар' },
+      { field: 'size', el: 'filterSize', label: 'Размер' },
+      { field: 'color', el: 'filterColor', label: 'Цвет' },
+      { field: 'brand', el: 'filterBrand', label: 'Бренд' },
+    ];
+    const filters = { name: '', size: '', color: '', brand: '' };
+
+    // Списки независимы: значения берутся по всему каталогу клиента и не сужаются
+    // соседними фильтрами. Выбранное значение сохраняется, если оно ещё есть
+    // в новом наборе (сменили клиента — «его» бренда может уже не быть).
+    async function loadFilterOptions() {
+      const q = new URLSearchParams();
+      if (showArchived) q.set('include_archived', 'true');
+      if (Fulfil.clientFilter.clientId) q.set('client_id', String(Fulfil.clientFilter.clientId));
+      let options;
+      try {
+        options = await Fulfil.api('GET', '/products/filter-options?' + q.toString());
+      } catch (err) {
+        // Списки не загрузились — фильтры остаются пустыми, каталог виден целиком.
+        return;
+      }
+      FILTERS.forEach((f) => {
+        const select = document.getElementById(f.el);
+        const values = options[f.field] || [];
+        if (!values.includes(filters[f.field])) filters[f.field] = '';
+        select.innerHTML =
+          `<option value="">${Fulfil.esc(f.label)}: все</option>` +
+          values.map((v) => `<option value="${Fulfil.esc(v)}">${Fulfil.esc(v)}</option>`).join('');
+        select.value = filters[f.field];
+      });
+      syncResetButton();
+    }
+
+    function syncResetButton() {
+      document.getElementById('btnResetFilters').hidden = !FILTERS.some((f) => filters[f.field]);
+    }
+
+    /** Перезагрузка и списков значений, и каталога. Нужна там, где меняется сам
+     *  набор значений (правка/создание товара, синк с WB, архивация), а не только
+     *  выдача — иначе в фильтре останется бренд, которого уже нет. */
+    function reloadAll() {
+      return loadFilterOptions().then(load);
+    }
+
     async function load() {
       const body = document.getElementById('body');
       try {
         const q = new URLSearchParams();
         if (currentSearch) q.set('search', currentSearch);
         if (showArchived) q.set('include_archived', 'true');
+        if (Fulfil.clientFilter.clientId) q.set('client_id', String(Fulfil.clientFilter.clientId));
+        FILTERS.forEach((f) => {
+          if (filters[f.field]) q.set(f.field, filters[f.field]);
+        });
         const items = await Fulfil.api('GET', '/products?' + q.toString());
         if (!items.length) {
-          body.innerHTML = '<div class="empty-state">Товаров пока нет</div>';
+          // С активным фильтром «Товаров пока нет» вводит в заблуждение: каталог
+          // не пуст, просто под условия ничего не подошло.
+          const narrowed = currentSearch || FILTERS.some((f) => filters[f.field]);
+          body.innerHTML = narrowed
+            ? '<div class="empty-state">Под выбранные условия ничего не подошло</div>'
+            : '<div class="empty-state">Товаров пока нет</div>';
           return;
         }
         body.innerHTML = items
@@ -149,6 +222,7 @@
                 ? `<span class="meta-item"><span class="meta-label">ШК:</span> <span class="meta-value mono">${Fulfil.esc(p.barcode)}</span>${mark('barcode')}</span>`
                 : `<span class="meta-item"><span class="meta-label">ШК:</span> <i>не задан</i>${mark('barcode')}</span>`
             );
+            metaField('Клиент', p.clientName);
             metaField('Артикул', p.vendorCode, 'vendor_code');
             metaField('Бренд', p.brand, 'brand');
             metaField('Размер', p.size, 'size');
@@ -202,7 +276,7 @@
             try {
               await Fulfil.api('POST', `/products/${btn.dataset.id}/restore`);
               Fulfil.toast('Товар восстановлен');
-              load();
+              reloadAll();
             } catch (err) {
               Fulfil.toast(Fulfil.errorText(err), 'error');
             }
@@ -218,7 +292,7 @@
       try {
         const res = await Fulfil.api('DELETE', `/products/${id}`);
         Fulfil.toast(res.outcome === 'archived' ? 'Товар архивирован (есть история)' : 'Товар удалён');
-        load();
+        reloadAll();
       } catch (err) {
         Fulfil.toast(Fulfil.errorText(err), 'error');
       }
@@ -247,6 +321,7 @@
         body.innerHTML = `
           <h2>Изменить товар</h2>
           ${p.imageUrl ? `<div class="edit-photo"><img src="${Fulfil.esc(p.imageUrl)}" alt="Фото товара" loading="lazy" /></div>` : ''}
+          <div><div class="field-label"><span>Клиент</span></div><div class="meta-value">${Fulfil.esc(p.clientName || '')}</div></div>
           ${fieldRow('Название', 'editName', p.name, 'name', manual)}
           ${fieldRow('Бренд', 'editBrand', p.brand, 'brand', manual)}
           ${fieldRow('Размер', 'editSize', p.size, 'size', manual)}
@@ -289,7 +364,7 @@
             await Fulfil.api('PATCH', `/products/${id}`, patch);
             Fulfil.toast('Товар изменён');
             overlay.classList.remove('open');
-            load();
+            reloadAll();
           } catch (err) {
             Fulfil.toast(Fulfil.errorText(err), 'error');
           }
@@ -301,21 +376,54 @@
 
     document.getElementById('btnSync').addEventListener('click', async () => {
       try {
-        const res = await Fulfil.api('POST', '/products/sync-from-wb');
-        Fulfil.toast(`Синхронизировано товаров: ${res.imported}`);
-        load();
+        const clientId = Fulfil.clientFilter.clientId;
+        const res = await Fulfil.api(
+          'POST', '/products/sync-from-wb' + (clientId ? `?client_id=${clientId}` : '')
+        );
+        // По каждому клиенту — своя строка тоста (Этап 1, п.1.5): ошибка одного
+        // клиента не мешает увидеть результат остальных.
+        if (!res.results.length) {
+          Fulfil.toast('Нет клиентов с заданным ключом API для синхронизации', 'error');
+        } else {
+          res.results.forEach((r) => {
+            const msg = r.error
+              ? `${r.clientName}: ошибка — ${r.error}`
+              : `${r.clientName}: синхронизировано ${r.imported}`;
+            Fulfil.toast(msg, r.error ? 'error' : 'success');
+          });
+        }
+        reloadAll();
       } catch (err) {
         Fulfil.toast(Fulfil.errorText(err), 'error');
       }
     });
 
+    async function fillNewProductClientSelect() {
+      const select = document.getElementById('newClientId');
+      select.innerHTML = '<option value="">Загрузка…</option>';
+      try {
+        const clients = await Fulfil.api('GET', '/clients');
+        select.innerHTML = clients.map((c) => `<option value="${c.id}">${Fulfil.esc(c.name)}</option>`).join('');
+        if (Fulfil.clientFilter.clientId) select.value = String(Fulfil.clientFilter.clientId);
+      } catch (err) {
+        select.innerHTML = '<option value="">Не удалось загрузить клиентов</option>';
+      }
+    }
+
     document.getElementById('btnNewProduct').addEventListener('click', () => {
+      fillNewProductClientSelect();
       document.getElementById('newModal').classList.add('open');
     });
     document.getElementById('newForm').addEventListener('submit', async (e) => {
       e.preventDefault();
+      const clientId = Number(document.getElementById('newClientId').value);
+      if (!clientId) {
+        Fulfil.toast('Выберите клиента', 'error');
+        return;
+      }
       try {
         await Fulfil.api('POST', '/products', {
+          clientId,
           barcode: document.getElementById('newBarcode').value,
           name: document.getElementById('newName').value,
           brand: document.getElementById('newBrand').value || null,
@@ -325,7 +433,7 @@
         Fulfil.toast('Товар создан');
         document.getElementById('newModal').classList.remove('open');
         e.target.reset();
-        load();
+        reloadAll();
       } catch (err) {
         Fulfil.toast(Fulfil.errorText(err), 'error');
       }
@@ -333,6 +441,24 @@
 
     document.getElementById('showArchived').addEventListener('change', (e) => {
       showArchived = e.target.checked;
+      // Архивные меняют и набор значений в фильтрах, не только выдачу.
+      loadFilterOptions().then(load);
+    });
+
+    FILTERS.forEach((f) => {
+      document.getElementById(f.el).addEventListener('change', (e) => {
+        filters[f.field] = e.target.value;
+        syncResetButton();
+        load();
+      });
+    });
+
+    document.getElementById('btnResetFilters').addEventListener('click', () => {
+      FILTERS.forEach((f) => {
+        filters[f.field] = '';
+        document.getElementById(f.el).value = '';
+      });
+      syncResetButton();
       load();
     });
 
@@ -343,7 +469,8 @@
       searchTimer = setTimeout(load, 250);
     });
 
-    load();
+    // Смена клиента меняет и каталог, и набор значений в фильтрах.
+    Fulfil.clientFilter.mount(document.getElementById('clientFilterMount'), reloadAll).then(reloadAll);
   </script>
 </body>
 </html>

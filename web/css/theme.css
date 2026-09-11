@@ -99,6 +99,24 @@ a { color: var(--blue); }
   margin: 0;
 }
 
+/* Панель действий в шапке: кнопки и переключатели одной строкой.
+   Класс объявляла каждая страница у себя, а «Клиенты» — нет вовсе, и там
+   кнопка «+ Клиент» уезжала под чекбокс. Правило одно на всех. */
+.toolbar {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.archived-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 16px;
+  color: var(--text-2);
+  white-space: nowrap;
+}
+
 /* ── Кнопки ─────────────────────────────────────────────────────── */
 
 .btn {

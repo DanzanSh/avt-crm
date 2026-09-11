@@ -6,8 +6,8 @@ from fulfil.services.scan import fix_ru_layout, resolve_scan
 from fulfil.services.storage import generate_cells
 
 
-def _make_product(db, barcode="2000000000017", name="Майка белая") -> Product:
-    p = Product(barcode=barcode, name=name)
+def _make_product(db, seller, barcode="2000000000017", name="Майка белая") -> Product:
+    p = Product(client_id=seller.id, barcode=barcode, name=name)
     db.add(p)
     db.commit()
     db.refresh(p)
@@ -20,8 +20,8 @@ def test_fix_ru_layout_matches_scan_layout_js_table():
     assert fix_ru_layout("qwe") == "qwe"  # латиница не трогается
 
 
-def test_resolve_scan_finds_product_by_exact_barcode(db):
-    product = _make_product(db)
+def test_resolve_scan_finds_product_by_exact_barcode(db, seller):
+    product = _make_product(db, seller)
     kind, entity = resolve_scan(db, product.barcode)
     assert kind == "product"
     assert entity.id == product.id
@@ -46,7 +46,7 @@ def test_resolve_scan_not_found(db):
         resolve_scan(db, "totally-unknown-code")
 
 
-def test_resolve_scan_ambiguous_when_raw_and_fixed_both_exist_as_different_entities(db):
+def test_resolve_scan_ambiguous_when_raw_and_fixed_both_exist_as_different_entities(db, seller):
     """Guard неоднозначности (DEV-PLAN.md, placement-items.html): если сырой код и код
     после исправления раскладки существуют и указывают на разные сущности — отказ,
     а не угадывание (FEATURES-PLAN.md, дефект №4)."""
@@ -54,17 +54,45 @@ def test_resolve_scan_ambiguous_when_raw_and_fixed_both_exist_as_different_entit
     fixed = fix_ru_layout(raw)
     assert fixed == "fug"
 
-    product_raw = _make_product(db, barcode=raw, name="Товар как есть")
-    product_fixed = _make_product(db, barcode=fixed, name="Товар после раскладки")
+    product_raw = _make_product(db, seller, barcode=raw, name="Товар как есть")
+    product_fixed = _make_product(db, seller, barcode=fixed, name="Товар после раскладки")
     assert product_raw.id != product_fixed.id
 
     with pytest.raises(AmbiguousCodeError):
         resolve_scan(db, raw)
 
 
-def test_resolve_scan_not_ambiguous_when_only_one_candidate_exists(db):
+def test_resolve_scan_not_ambiguous_when_only_one_candidate_exists(db, seller):
     raw = "агп"
-    product = _make_product(db, barcode=raw, name="Товар")
+    product = _make_product(db, seller, barcode=raw, name="Товар")
     kind, entity = resolve_scan(db, raw)
     assert kind == "product"
     assert entity.id == product.id
+
+
+def test_resolve_scan_barcode_shared_by_two_clients_is_ambiguous_without_client_id(db, seller):
+    """Этап 1, п.1.4: один и тот же баркод у двух клиентов — без явного client_id
+    409 ambiguous_barcode со списком кандидатов, а не угадывание первого попавшегося."""
+    from conftest import make_client
+
+    other = make_client(db, name="Другой клиент")
+    p1 = _make_product(db, seller, barcode="2000000000017", name="У продавца 1")
+    p2 = _make_product(db, other, barcode="2000000000017", name="У продавца 2")
+
+    with pytest.raises(AmbiguousCodeError) as exc_info:
+        resolve_scan(db, "2000000000017")
+    candidates = exc_info.value.extra["candidates"]
+    assert {c["clientId"] for c in candidates} == {seller.id, other.id}
+    assert {c["productId"] for c in candidates} == {p1.id, p2.id}
+
+
+def test_resolve_scan_with_client_id_finds_only_that_clients_product(db, seller):
+    from conftest import make_client
+
+    other = make_client(db, name="Другой клиент 2")
+    _make_product(db, seller, barcode="2000000000017", name="У продавца 1")
+    p2 = _make_product(db, other, barcode="2000000000017", name="У продавца 2")
+
+    kind, entity = resolve_scan(db, "2000000000017", client_id=other.id)
+    assert kind == "product"
+    assert entity.id == p2.id

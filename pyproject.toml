@@ -17,6 +17,9 @@ dependencies = [
     "pillow>=10.0",
     "python-jose[cryptography]>=3.3",
     "python-multipart>=0.0.9",
+    # Fernet для шифрования API-ключей клиентов (Этап 1) — раньше приходила
+    # транзитивно через python-jose[cryptography], теперь зависимость явная.
+    "cryptography>=42",
 ]
 
 [project.optional-dependencies]

@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from fulfil.errors import CellOccupiedError
+from fulfil.models.client import Client
 from fulfil.models.product import Product
 from fulfil.models.receiving import Receipt, ReceiptLine, ReceiptStatus
 from fulfil.models.storage import Cell
@@ -66,14 +67,18 @@ def place_stock(
     return row
 
 
-def get_or_create_open_receipt(db: Session) -> Receipt:
+def get_or_create_open_receipt(db: Session, client: Client) -> Receipt:
+    """Открытая приёмка — теперь на конкретного клиента (Этап 1, п.1.4): у каждого
+    клиента своя открытая приёмка, а не одна общая на всё приложение."""
     receipt = db.scalar(
-        select(Receipt).where(Receipt.status == ReceiptStatus.IN_PROGRESS).order_by(Receipt.id.desc())
+        select(Receipt)
+        .where(Receipt.status == ReceiptStatus.IN_PROGRESS, Receipt.client_id == client.id)
+        .order_by(Receipt.id.desc())
     )
     if receipt is None:
         last_id = db.scalar(select(Receipt.id).order_by(Receipt.id.desc())) or 0
         number = f"RCPT-{last_id + 1:06d}"
-        receipt = Receipt(number=number, status=ReceiptStatus.IN_PROGRESS)
+        receipt = Receipt(client_id=client.id, number=number, status=ReceiptStatus.IN_PROGRESS)
         db.add(receipt)
         db.commit()
         db.refresh(receipt)
@@ -101,15 +106,19 @@ def add_receipt_line(
 
 
 def list_receipt_lines(
-    db: Session, *, limit: int = 50, offset: int = 0, cell_id: int | None = None
+    db: Session, *, limit: int = 50, offset: int = 0, cell_id: int | None = None,
+    client_id: int | None = None,
 ) -> list[dict]:
     """История приёмок, newest-first. Join по id без фильтра deleted_at/archived_at —
     строка истории должна пережить архивацию товара или удаление места.
-    cell_id — необязательный фильтр по месту приёмки (для карточки места, C.2)."""
+    cell_id — необязательный фильтр по месту приёмки (для карточки места, C.2).
+    client_id — необязательный фильтр по клиенту (Этап 1, п.1.4)."""
     stmt = (
         select(
             ReceiptLine.id,
             Receipt.number,
+            Receipt.client_id,
+            Client.name.label("client_name"),
             Product.name,
             Product.barcode,
             Cell.address,
@@ -118,17 +127,22 @@ def list_receipt_lines(
             ReceiptLine.created_at,
         )
         .join(Receipt, Receipt.id == ReceiptLine.receipt_id)
+        .join(Client, Client.id == Receipt.client_id)
         .join(Product, Product.id == ReceiptLine.product_id)
         .join(Cell, Cell.id == ReceiptLine.cell_id)
         .order_by(ReceiptLine.id.desc())
     )
     if cell_id is not None:
         stmt = stmt.where(ReceiptLine.cell_id == cell_id)
+    if client_id is not None:
+        stmt = stmt.where(Receipt.client_id == client_id)
     rows = db.execute(stmt.limit(limit).offset(offset)).all()
     return [
         {
             "id": r.id,
             "receiptNumber": r.number,
+            "clientId": r.client_id,
+            "clientName": r.client_name,
             "productName": r.name,
             "barcode": r.barcode,
             "cellAddress": r.address,

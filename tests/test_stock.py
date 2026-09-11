@@ -5,17 +5,19 @@ from fulfil.services.storage import generate_cells
 from fulfil.services.stock import get_stock_summary, transfer_to_fbs
 
 
-def _make_product(db) -> Product:
-    p = Product(barcode="2000000000017", name="Майка белая")
+def _make_product(db, seller) -> Product:
+    seller.wb_warehouse_id = "WH-1"
+    db.commit()
+    p = Product(client_id=seller.id, barcode="2000000000017", name="Майка белая")
     db.add(p)
     db.commit()
     db.refresh(p)
     return p
 
 
-def test_transfer_to_fbs_client_scenario(db):
+def test_transfer_to_fbs_client_scenario(db, seller):
     """101 принято -> 101 передано -> +59 принято -> 160 всего / 101 в ФБС / 59 доступно."""
-    product = _make_product(db)
+    product = _make_product(db, seller)
     [cell] = generate_cells(db, "A", racks=1, cells_per_rack=1)
     wb = WBMockClient()
 
@@ -30,8 +32,8 @@ def test_transfer_to_fbs_client_scenario(db):
     assert summary["availableToTransfer"] == 59
 
 
-def test_transfer_to_fbs_idempotent_on_retry(db):
-    product = _make_product(db)
+def test_transfer_to_fbs_idempotent_on_retry(db, seller):
+    product = _make_product(db, seller)
     [cell] = generate_cells(db, "A", racks=1, cells_per_rack=1)
     wb = WBMockClient()
     place_stock(db, product, cell, 10)

@@ -12,6 +12,8 @@ class OrderItemOut(CamelModel):
 
 class OrderOut(CamelModel):
     id: int
+    client_id: int
+    client_name: str | None = None
     wb_order_id: str
     status: str
     items: list[OrderItemOut] = []
@@ -36,7 +38,13 @@ class CreateBoxesRequest(CamelModel):
     amount: int
 
 
+class CreateSupplyRequest(CamelModel):
+    client_id: int
+
+
 class SupplyOut(CamelModel):
     id: int
+    client_id: int
+    client_name: str | None = None
     wb_supply_id: str | None
     status: str

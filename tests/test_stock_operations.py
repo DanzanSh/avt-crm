@@ -7,16 +7,16 @@ from fulfil.services.storage import block_cell, generate_cells
 from fulfil.services.stock import adjust_stock, get_moves, move_stock, write_off_stock
 
 
-def _make_product(db, barcode="2000000000017", name="Майка белая") -> Product:
-    p = Product(barcode=barcode, name=name)
+def _make_product(db, seller, barcode="2000000000017", name="Майка белая") -> Product:
+    p = Product(client_id=seller.id, barcode=barcode, name=name)
     db.add(p)
     db.commit()
     db.refresh(p)
     return p
 
 
-def test_adjust_stock_happy_path(db):
-    product = _make_product(db)
+def test_adjust_stock_happy_path(db, seller):
+    product = _make_product(db, seller)
     [cell] = generate_cells(db, "A", racks=1, cells_per_rack=1)
     place_stock(db, product, cell, 100)
 
@@ -24,8 +24,8 @@ def test_adjust_stock_happy_path(db):
     assert row.qty == 90
 
 
-def test_adjust_stock_rejects_stale_expected_qty(db):
-    product = _make_product(db)
+def test_adjust_stock_rejects_stale_expected_qty(db, seller):
+    product = _make_product(db, seller)
     [cell] = generate_cells(db, "A", racks=1, cells_per_rack=1)
     place_stock(db, product, cell, 100)
 
@@ -40,10 +40,10 @@ def test_adjust_stock_rejects_stale_expected_qty(db):
     assert rows[0]["qty"] == 100
 
 
-def test_adjust_stock_decrease_requires_comment(db):
+def test_adjust_stock_decrease_requires_comment(db, seller):
     from fulfil.errors import AppError
 
-    product = _make_product(db)
+    product = _make_product(db, seller)
     [cell] = generate_cells(db, "A", racks=1, cells_per_rack=1)
     place_stock(db, product, cell, 100)
 
@@ -51,10 +51,10 @@ def test_adjust_stock_decrease_requires_comment(db):
         adjust_stock(db, product, cell, new_qty=50, expected_qty=100, actor="tester", comment=None)
 
 
-def test_write_off_zeroes_and_frees_cell(db):
+def test_write_off_zeroes_and_frees_cell(db, seller):
     from fulfil.models.storage import CellStatus
 
-    product = _make_product(db)
+    product = _make_product(db, seller)
     [cell] = generate_cells(db, "A", racks=1, cells_per_rack=1)
     place_stock(db, product, cell, 30)
 
@@ -67,8 +67,8 @@ def test_write_off_zeroes_and_frees_cell(db):
     assert cell.status == CellStatus.FREE
 
 
-def test_move_stock_preserves_total(db):
-    product = _make_product(db)
+def test_move_stock_preserves_total(db, seller):
+    product = _make_product(db, seller)
     cells_a = generate_cells(db, "A", racks=1, cells_per_rack=1)
     cells_b = generate_cells(db, "B", racks=1, cells_per_rack=1)
     place_stock(db, product, cells_a[0], 50)
@@ -81,8 +81,8 @@ def test_move_stock_preserves_total(db):
     assert summary["total"] == 50
 
 
-def test_move_stock_into_blocked_cell_rejected(db):
-    product = _make_product(db)
+def test_move_stock_into_blocked_cell_rejected(db, seller):
+    product = _make_product(db, seller)
     cells_a = generate_cells(db, "A", racks=1, cells_per_rack=1)
     cells_b = generate_cells(db, "B", racks=1, cells_per_rack=1)
     place_stock(db, product, cells_a[0], 50)
@@ -92,9 +92,9 @@ def test_move_stock_into_blocked_cell_rejected(db):
         move_stock(db, product, cells_a[0], cells_b[0], qty=10, expected_qty=50, actor="tester")
 
 
-def test_move_stock_into_cell_with_other_sku_rejected(db):
-    product_a = _make_product(db, barcode="1111111111111", name="A")
-    product_b = _make_product(db, barcode="2222222222222", name="B")
+def test_move_stock_into_cell_with_other_sku_rejected(db, seller):
+    product_a = _make_product(db, seller, barcode="1111111111111", name="A")
+    product_b = _make_product(db, seller, barcode="2222222222222", name="B")
     cells_a = generate_cells(db, "A", racks=1, cells_per_rack=1)
     cells_b = generate_cells(db, "B", racks=1, cells_per_rack=1)
     place_stock(db, product_a, cells_a[0], 50)
@@ -104,10 +104,10 @@ def test_move_stock_into_cell_with_other_sku_rejected(db):
         move_stock(db, product_a, cells_a[0], cells_b[0], qty=10, expected_qty=50, actor="tester")
 
 
-def test_move_stock_empties_source_cell_to_free(db):
+def test_move_stock_empties_source_cell_to_free(db, seller):
     from fulfil.models.storage import CellStatus
 
-    product = _make_product(db)
+    product = _make_product(db, seller)
     cells_a = generate_cells(db, "A", racks=1, cells_per_rack=1)
     cells_b = generate_cells(db, "B", racks=1, cells_per_rack=1)
     place_stock(db, product, cells_a[0], 50)
@@ -120,8 +120,8 @@ def test_move_stock_empties_source_cell_to_free(db):
     assert cells_b[0].status == CellStatus.OCCUPIED
 
 
-def test_get_moves_journal_records_actor_and_group(db):
-    product = _make_product(db)
+def test_get_moves_journal_records_actor_and_group(db, seller):
+    product = _make_product(db, seller)
     cells_a = generate_cells(db, "A", racks=1, cells_per_rack=1)
     cells_b = generate_cells(db, "B", racks=1, cells_per_rack=1)
     place_stock(db, product, cells_a[0], 50, actor="receiver")

@@ -29,8 +29,14 @@ def fix_ru_layout(s: str) -> str:
     return "".join(_RU_TO_EN.get(ch, ch) for ch in s)
 
 
-def _find_product(db: Session, code: str) -> Product | None:
-    return db.scalar(select(Product).where(Product.barcode == code, Product.archived_at.is_(None)))
+def _find_products(db: Session, code: str, client_id: int | None) -> list[Product]:
+    """Товары с этим баркодом среди живых. client_id задан — только у этого клиента
+    (документ уже знает своего клиента: приёмка, заказ). Не задан — по всем клиентам,
+    дальше resolve_scan решает, однозначно это или нет (Этап 1, п.1.4)."""
+    stmt = select(Product).where(Product.barcode == code, Product.archived_at.is_(None))
+    if client_id is not None:
+        stmt = stmt.where(Product.client_id == client_id)
+    return list(db.scalars(stmt))
 
 
 def _find_cell(db: Session, code: str):
@@ -40,8 +46,13 @@ def _find_cell(db: Session, code: str):
         return None
 
 
-def resolve_scan(db: Session, raw_code: str) -> tuple[str, object]:
-    """Возвращает (kind, entity), kind ∈ {'product', 'cell'}."""
+def resolve_scan(db: Session, raw_code: str, client_id: int | None = None) -> tuple[str, object]:
+    """Возвращает (kind, entity), kind ∈ {'product', 'cell'}.
+
+    client_id — контекст документа (приёмка/заказ): товар ищется только у этого
+    клиента. Без client_id (скан вне контекста, например перемещение в «Остатках»)
+    баркод, совпавший у нескольких клиентов, — AmbiguousCodeError со списком
+    кандидатов вместо угадывания."""
     raw = raw_code.strip()
     if not raw:
         raise NotFoundError("Пустой код.")
@@ -51,9 +62,17 @@ def resolve_scan(db: Session, raw_code: str) -> tuple[str, object]:
 
     hits: list[tuple[str, str, object]] = []  # (candidate, kind, entity)
     for cand in candidates:
-        product = _find_product(db, cand)
-        if product is not None:
-            hits.append((cand, "product", product))
+        products = _find_products(db, cand, client_id)
+        if products:
+            if client_id is None and len(products) > 1:
+                raise AmbiguousCodeError(
+                    f'Баркод «{cand}» есть у нескольких клиентов — укажите клиента явно.',
+                    candidates=[
+                        {"clientId": p.client_id, "clientName": p.client.name, "productId": p.id}
+                        for p in products
+                    ],
+                )
+            hits.append((cand, "product", products[0]))
             continue  # баркод найден — не пытаемся трактовать тот же кандидат как адрес
         cell = _find_cell(db, cand)
         if cell is not None:

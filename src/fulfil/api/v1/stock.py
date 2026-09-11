@@ -2,7 +2,7 @@ import datetime as dt
 
 from fastapi import APIRouter, Depends, Header
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from fulfil.auth import get_current_user
 from fulfil.db import get_db
@@ -27,8 +27,16 @@ def _actor(user: dict) -> str:
 
 
 @router.get("")
-def list_stock(db: Session = Depends(get_db)) -> list[dict]:
-    products = db.scalars(select(Product).where(Product.archived_at.is_(None)).order_by(Product.name)).all()
+def list_stock(client_id: int | None = None, db: Session = Depends(get_db)) -> list[dict]:
+    stmt = (
+        select(Product)
+        .options(selectinload(Product.client))
+        .where(Product.archived_at.is_(None))
+        .order_by(Product.name)
+    )
+    if client_id is not None:
+        stmt = stmt.where(Product.client_id == client_id)
+    products = db.scalars(stmt).all()
     result = []
     for p in products:
         summary = stock_service.get_stock_summary(db, p)
@@ -39,6 +47,8 @@ def list_stock(db: Session = Depends(get_db)) -> list[dict]:
                 **summary,
                 "productName": p.name,
                 "barcode": p.barcode,
+                "clientId": p.client_id,
+                "clientName": p.client_name,
                 "byCell": stock_service.get_stock_by_cell(db, p),
             }
         )
@@ -64,16 +74,13 @@ def _get_cell(db: Session, cell_id: int):
 @router.get("/{product_id}")
 def get_product_stock(product_id: int, db: Session = Depends(get_db)) -> dict:
     product = _get_product(db, product_id)
-    return {
-        **stock_service.get_stock_summary(db, product),
-        "byCell": stock_service.get_stock_by_cell(db, product),
-    }
+    return _product_agg(db, product)
 
 
 @router.post("/{product_id}/transfer-fbs")
 def transfer_fbs(product_id: int, body: TransferFbsRequest, db: Session = Depends(get_db)) -> dict:
     product = _get_product(db, product_id)
-    wb_client = get_wb_client()
+    wb_client = get_wb_client(product.client)
     transfer = stock_service.transfer_to_fbs(db, product, body.qty, body.idempotency_key, wb_client)
     return {
         "id": transfer.id,
@@ -87,6 +94,8 @@ def _product_agg(db: Session, product: Product) -> dict:
         **stock_service.get_stock_summary(db, product),
         "productName": product.name,
         "barcode": product.barcode,
+        "clientId": product.client_id,
+        "clientName": product.client_name,
         "byCell": stock_service.get_stock_by_cell(db, product),
     }
 

@@ -1,23 +1,47 @@
-"""Мок WB API — фикстуры для разработки и тестов без боевого токена."""
+"""Мок WB API — фикстуры для разработки и тестов без боевого токена.
+
+Этап 1: одна карточка с несколькими размерами (чтобы тесты и dev-стенд ловили
+разворот sizes[] в отдельные товары), и баркоды/номера заказов зависят от client_id —
+два клиента в мок-режиме не видят одинаковых данных, это и проверяют test_clients.py."""
 
 import base64
 import uuid
 
 from fulfil.integrations.wb.base import WbCardsPage, WbCursor, WbOrder, WbSticker
 
-_FIXTURE_CARDS: list[dict] = [
-    {
-        "nmId": 100001,
-        "imtId": 900001,
-        "vendorCode": "TSHIRT-WHITE-M",
-        "barcode": "2000000000017",
-        "name": "Майка белая",
-        "brand": "Demo Brand",
-        "size": "M",
-        "color": "белый",
-        "imageUrl": "",
-    },
-]
+
+def _fixture_cards(client_id: int) -> list[dict]:
+    # Баркоды валидны по validate_gtin (13 цифр). client_id зашит в середину номера,
+    # чтобы у разных клиентов гарантированно не совпадали — реальная многоарендность
+    # в моке, а не общая фикстура на всех.
+    suffix = f"{client_id:03d}"
+    return [
+        {
+            "nmId": 100001,
+            "imtId": 900001,
+            "chrtId": 800001,
+            "vendorCode": "TSHIRT-WHITE",
+            "barcode": f"20000{suffix}0017",
+            "name": "Майка белая",
+            "brand": "Demo Brand",
+            "size": "M",
+            "color": "белый",
+            "imageUrl": "",
+        },
+        {
+            "nmId": 100001,
+            "imtId": 900001,
+            "chrtId": 800002,
+            "vendorCode": "TSHIRT-WHITE",
+            "barcode": f"20000{suffix}0024",
+            "name": "Майка белая",
+            "brand": "Demo Brand",
+            "size": "L",
+            "color": "белый",
+            "imageUrl": "",
+        },
+    ]
+
 
 _PNG_1PX = base64.b64encode(
     bytes.fromhex(
@@ -29,9 +53,17 @@ _PNG_1PX = base64.b64encode(
 
 
 class WBMockClient:
-    def __init__(self) -> None:
+    def __init__(self, client_id: int = 0) -> None:
+        self._client_id = client_id
         self._orders: list[dict] = []
         self._supplies: dict[str, dict] = {}
+        self._cards_served = False
+
+    def ping(self) -> dict:
+        return {
+            "marketplace": {"ok": True, "error": None},
+            "content": {"ok": True, "error": None},
+        }
 
     def get_product_cards(self, cursor: WbCursor | None = None) -> WbCardsPage:
         # Инкрементальный синк: с сохранённым курсором мок отдаёт пусто (total 0 < limit),
@@ -39,8 +71,10 @@ class WBMockClient:
         if cursor:
             return {"cards": [], "cursor": {**cursor, "total": 0}}
         # Первая выгрузка: одна страница (total 1 < limit 100 → цикл завершается).
+        # total — число КАРТОЧЕК у WB (одна карточка с двумя размерами), не число
+        # получившихся товаров — это не меняется относительно Этапа 0.
         return {
-            "cards": _FIXTURE_CARDS,
+            "cards": _fixture_cards(self._client_id),
             "cursor": {"updatedAt": "2026-01-01T00:00:00Z", "nmID": 100001, "total": 1},
         }
 
@@ -51,11 +85,11 @@ class WBMockClient:
         if self._orders:
             return []  # мок отдаёт фикстуру один раз — второй sync не дублирует
         order: WbOrder = {
-            "orderId": "WB-ORDER-DEMO-1",
+            "orderId": f"WB-ORDER-DEMO-{self._client_id}",
             "supplyId": None,
             "createdAt": "2026-08-28T10:00:00+00:00",
             "deadlineAt": "2026-08-29T10:00:00+00:00",
-            "items": [{"barcode": "2000000000017", "qty": 1}],
+            "items": [{"barcode": _fixture_cards(self._client_id)[0]["barcode"], "qty": 1}],
         }
         self._orders.append(order)
         return [order]

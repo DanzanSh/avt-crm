@@ -22,6 +22,7 @@ PAGES: list[PageDef] = [
     PageDef("receiving", "/receiving.html", "Приёмка", "Склад"),
     PageDef("stock", "/stock.html", "Остатки", "Склад"),
     PageDef("products", "/products.html", "Товары", "Справочники"),
+    PageDef("clients", "/clients.html", "Клиенты", "Справочники"),
     PageDef("orders", "/fbs/orders.html", "Заказы ФБС", "ФБС"),
     PageDef("picking", "/fbs/picking.html", "Сборка заказа", "ФБС"),
     PageDef("supplies", "/fbs/supplies.html", "Поставки", "ФБС"),

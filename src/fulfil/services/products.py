@@ -10,17 +10,25 @@ import datetime as dt
 import re
 
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from fulfil.errors import AppError
 from fulfil.integrations.wb.base import WBClient
 from fulfil.models import audit
+from fulfil.models.client import Client
 from fulfil.models.integration_state import IntegrationState
 from fulfil.models.product import Product
 from fulfil.models.storage import Cell, CellAllowedBarcode
 
-_WB_STATE_KEY = "wb.product_cards"
+_WB_STATE_KEY_PREFIX = "wb.product_cards"
 _WB_PAGE_LIMIT = 100
+
+
+def _wb_state_key(client_id: int) -> str:
+    # Курсор синка — на каждого клиента отдельно (Этап 1, п.1.1): у каждого кабинета
+    # WB своя история updatedAt/nmID, общий курсор перепутал бы их между собой.
+    return f"{_WB_STATE_KEY_PREFIX}:{client_id}"
+
 
 _VALID_GTIN_LENGTHS = {8, 12, 13, 14}
 _INTERNAL_BARCODE_RE = re.compile(r"^LDX-\d{6}$")
@@ -53,25 +61,31 @@ def generate_internal_barcode(db: Session, product: Product, prefix: str = "LDX"
     return code
 
 
-def _upsert_card(db: Session, card: dict) -> bool:
-    """Апсёрт одной карточки WB. Порядок матчинга: сперва по wb_nm_id, затем по
-    barcode, иначе создать. Возвращает True, если карточка обработана."""
+def _upsert_card(db: Session, client: Client, card: dict) -> bool:
+    """Апсёрт одного размера карточки WB (Этап 1: товар = размер карточки, п.1.1).
+    Порядок матчинга — В ПРЕДЕЛАХ КЛИЕНТА: сперва по (client_id, wb_chrt_id), затем
+    по (client_id, barcode) — уже существующие до этапа товары ещё не имеют chrt_id
+    и находятся по баркоду, иначе создать новый. Возвращает True, если обработан."""
     barcode = card.get("barcode") or ""
-    nm_id = card.get("nmId")
+    chrt_id = card.get("chrtId")
 
     product = None
-    if nm_id is not None:
+    if chrt_id is not None:
         product = db.scalar(
-            select(Product).where(Product.wb_nm_id == nm_id, Product.archived_at.is_(None))
+            select(Product).where(
+                Product.client_id == client.id, Product.wb_chrt_id == chrt_id, Product.archived_at.is_(None),
+            )
         )
     if product is None and barcode:
         product = db.scalar(
-            select(Product).where(Product.barcode == barcode, Product.archived_at.is_(None))
+            select(Product).where(
+                Product.client_id == client.id, Product.barcode == barcode, Product.archived_at.is_(None),
+            )
         )
     if product is None:
         if not barcode:
             return False  # нечем идентифицировать новый товар
-        product = Product(barcode=barcode, name=card.get("name", ""))
+        product = Product(client_id=client.id, barcode=barcode, name=card.get("name", ""))
         db.add(product)
         db.flush()
 
@@ -89,44 +103,102 @@ def _upsert_card(db: Session, card: dict) -> bool:
             continue  # изменено вручную — синк не перезаписывает (Scope IN п.4)
         setattr(product, field, value)
 
-    product.wb_nm_id = nm_id
+    product.wb_nm_id = card.get("nmId")
     product.wb_imt_id = card.get("imtId")
+    product.wb_chrt_id = chrt_id
     product.synced_at = dt.datetime.now(dt.timezone.utc)
     return True
 
 
-def sync_products_from_wb(db: Session, wb_client: WBClient, *, full: bool = False) -> dict:
-    """Инкрементальная синхронизация карточек WB. Курсор {updatedAt, nmID} последнего
-    ответа сохраняется в integration_state и переиспользуется при следующем запуске.
+def sync_products_from_wb(db: Session, client: Client, wb_client: WBClient, *, full: bool = False) -> dict:
+    """Инкрементальная синхронизация карточек WB одного клиента. Курсор
+    {updatedAt, nmID} последнего ответа хранится в integration_state под ключом
+    "wb.product_cards:<client_id>" — на каждого клиента отдельно (п.1.1).
     full=True — игнорировать сохранённый курсор (полная пересинхронизация)."""
-    state = db.get(IntegrationState, _WB_STATE_KEY)
+    state_key = _wb_state_key(client.id)
+    state = db.get(IntegrationState, state_key)
     cursor = None if full or not state or not (state.cursor or {}).get("updatedAt") else state.cursor
 
     imported = 0
     last = cursor
-    while True:
-        page = wb_client.get_product_cards(cursor)
-        for card in page["cards"]:
-            if _upsert_card(db, card):
-                imported += 1
-        c = page.get("cursor") or {}
-        last = {"updatedAt": c.get("updatedAt"), "nmID": c.get("nmID")}
-        if c.get("total", 0) < _WB_PAGE_LIMIT:
-            break
-        cursor = last
+    try:
+        while True:
+            page = wb_client.get_product_cards(cursor)
+            for card in page["cards"]:
+                if _upsert_card(db, client, card):
+                    imported += 1
+            c = page.get("cursor") or {}
+            last = {"updatedAt": c.get("updatedAt"), "nmID": c.get("nmID")}
+            if c.get("total", 0) < _WB_PAGE_LIMIT:
+                break
+            cursor = last
+    except AppError as exc:
+        client.last_sync_error = exc.detail
+        db.commit()
+        raise
 
     if state is None:
-        db.add(IntegrationState(key=_WB_STATE_KEY, cursor=last or {}))
+        db.add(IntegrationState(key=state_key, cursor=last or {}))
     else:
         state.cursor = last or {}
+    client.last_sync_at = dt.datetime.now(dt.timezone.utc)
+    client.last_sync_error = None
     db.commit()
     return {"imported": imported, "cursor": last}
 
 
+# Поля фильтров на странице «Товары» (feature.txt, п.3.1). Порядок значим — он же
+# порядок выпадающих списков в интерфейсе: товар → размер → цвет → бренд.
+FILTER_FIELDS = ("name", "size", "color", "brand")
+
+
+def list_products(
+    db: Session, *, search: str | None = None, include_archived: bool = False,
+    client_id: int | None = None, name: str | None = None, size: str | None = None,
+    color: str | None = None, brand: str | None = None,
+) -> list[Product]:
+    stmt = select(Product).options(selectinload(Product.client)).order_by(Product.id.desc())
+    if not include_archived:
+        stmt = stmt.where(Product.archived_at.is_(None))
+    if client_id is not None:
+        stmt = stmt.where(Product.client_id == client_id)
+    if search:
+        like = f"%{search}%"
+        stmt = stmt.where(Product.name.ilike(like) | Product.barcode.ilike(like))
+    # Значения фильтров приходят из выпадающих списков, а не вводятся руками,
+    # поэтому сравнение точное — в отличие от search с его ilike.
+    for field, value in zip(FILTER_FIELDS, (name, size, color, brand)):
+        if value:
+            stmt = stmt.where(getattr(Product, field) == value)
+    return list(db.scalars(stmt))
+
+
+def filter_options(
+    db: Session, *, client_id: int | None = None, include_archived: bool = False
+) -> dict[str, list[str]]:
+    """Значения для выпадающих фильтров каталога.
+
+    Списки независимы друг от друга: выбор бренда не сужает размеры (так согласовано
+    с заказчиком). Область — каталог выбранного клиента. Архивные товары дают значения
+    ровно тогда, когда они показаны в списке: иначе в фильтре остался бы выбор, под
+    который ничего не найдётся.
+    """
+    options: dict[str, list[str]] = {}
+    for field in FILTER_FIELDS:
+        column = getattr(Product, field)
+        stmt = select(column).distinct().where(column.is_not(None), column != "")
+        if not include_archived:
+            stmt = stmt.where(Product.archived_at.is_(None))
+        if client_id is not None:
+            stmt = stmt.where(Product.client_id == client_id)
+        options[field] = sorted(db.scalars(stmt), key=str.casefold)
+    return options
+
+
 def create_product(
-    db: Session, *, barcode: str, name: str, brand: str | None = None, size: str | None = None,
-    color: str | None = None, vendor_code: str | None = None, image_url: str | None = None,
-    actor: str,
+    db: Session, *, client_id: int, barcode: str, name: str, brand: str | None = None,
+    size: str | None = None, color: str | None = None, vendor_code: str | None = None,
+    image_url: str | None = None, actor: str,
 ) -> Product:
     barcode = barcode.strip()
     if not _validate_any_barcode(barcode):
@@ -136,14 +208,20 @@ def create_product(
             status_code=400,
             reason_code="invalid_barcode",
         )
-    clash = db.scalar(select(Product).where(Product.barcode == barcode, Product.archived_at.is_(None)))
+    # Уникальность — В ПРЕДЕЛАХ КЛИЕНТА (Этап 1, п.1.1): у двух клиентов может
+    # быть один и тот же баркод, это не конфликт.
+    clash = db.scalar(
+        select(Product).where(
+            Product.client_id == client_id, Product.barcode == barcode, Product.archived_at.is_(None),
+        )
+    )
     if clash is not None:
         raise AppError(
-            f'Товар с баркодом «{barcode}» уже существует.', status_code=409, reason_code="barcode_exists",
+            f'У этого клиента уже есть товар с баркодом «{barcode}».', status_code=409, reason_code="barcode_exists",
         )
 
     product = Product(
-        barcode=barcode, name=name, brand=brand, size=size, color=color,
+        client_id=client_id, barcode=barcode, name=name, brand=brand, size=size, color=color,
         vendor_code=vendor_code, image_url=image_url, manual_fields=list(_SIMPLE_PATCH_FIELDS),
     )
     db.add(product)
@@ -178,12 +256,13 @@ def _change_barcode(db: Session, product: Product, new_barcode: str) -> tuple[st
         )
     clash = db.scalar(
         select(Product).where(
-            Product.barcode == new_barcode, Product.archived_at.is_(None), Product.id != product.id
+            Product.client_id == product.client_id, Product.barcode == new_barcode,
+            Product.archived_at.is_(None), Product.id != product.id,
         )
     )
     if clash is not None:
         raise AppError(
-            f'Баркод «{new_barcode}» уже используется другим товаром.',
+            f'Баркод «{new_barcode}» уже используется другим товаром этого клиента.',
             status_code=409,
             reason_code="barcode_exists",
         )
@@ -305,12 +384,13 @@ def restore_product(db: Session, product: Product, actor: str) -> Product:
         raise AppError("Товар не архивирован.", status_code=400, reason_code="not_archived")
     clash = db.scalar(
         select(Product).where(
-            Product.barcode == product.barcode, Product.archived_at.is_(None), Product.id != product.id
+            Product.client_id == product.client_id, Product.barcode == product.barcode,
+            Product.archived_at.is_(None), Product.id != product.id,
         )
     )
     if clash is not None:
         raise AppError(
-            f'Баркод «{product.barcode}» с тех пор занял другой товар — восстановление невозможно.',
+            f'Баркод «{product.barcode}» с тех пор занял другой товар этого клиента — восстановление невозможно.',
             status_code=409,
             reason_code="barcode_taken",
         )

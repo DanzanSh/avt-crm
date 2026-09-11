@@ -7,7 +7,6 @@ import datetime as dt
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from fulfil.config import get_settings
 from fulfil.errors import AppError, CellOccupiedError, StockChangedError
 from fulfil.integrations.wb.base import WBClient
 from fulfil.models.product import Product
@@ -58,6 +57,17 @@ def transfer_to_fbs(
     if existing is not None:
         return existing  # повтор того же запроса — не передаём второй раз
 
+    # Склад берётся из клиента товара (Этап 1, п.1.4) — settings.wb_warehouse_id
+    # устарел, читает его только миграция.
+    warehouse_id = product.client.wb_warehouse_id
+    if not warehouse_id:
+        raise AppError(
+            f'У клиента «{product.client.name}» не указан склад WB — передать остаток некуда.',
+            status_code=409,
+            reason_code="no_wb_warehouse",
+            what_to_do="Укажите склад WB в разделе «Клиенты».",
+        )
+
     summary = get_stock_summary(db, product)
     if qty > summary["availableToTransfer"]:
         raise AppError(
@@ -66,11 +76,10 @@ def transfer_to_fbs(
             reason_code="not_enough_stock",
         )
 
-    settings = get_settings()
     transfer = FbsTransfer(
         product_id=product.id,
         qty=qty,
-        wb_warehouse_id=settings.wb_warehouse_id or None,
+        wb_warehouse_id=warehouse_id,
         status=FbsTransferStatus.PENDING,
         idempotency_key=idempotency_key,
     )
@@ -79,7 +88,7 @@ def transfer_to_fbs(
     db.refresh(transfer)
 
     try:
-        resp = wb_client.update_fbs_stock(settings.wb_warehouse_id, product.barcode, qty)
+        resp = wb_client.update_fbs_stock(warehouse_id, product.barcode, qty)
         transfer.status = FbsTransferStatus.SENT if resp.get("ok") else FbsTransferStatus.FAILED
         transfer.wb_response = str(resp)
     except Exception as exc:  # лимиты/сеть WB — не считаем поставку неудачной молча

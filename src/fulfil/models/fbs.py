@@ -32,6 +32,7 @@ class Order(Base):
     __tablename__ = "orders"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    client_id: Mapped[int] = mapped_column(ForeignKey("clients.id"), index=True)
     wb_order_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     wb_supply_id: Mapped[str | None] = mapped_column(String(64), index=True)
     supply_id: Mapped[int | None] = mapped_column(ForeignKey("supplies.id"), index=True)
@@ -45,6 +46,11 @@ class Order(Base):
     items: Mapped[list["OrderItem"]] = relationship(
         back_populates="order", cascade="all, delete-orphan"
     )
+    client: Mapped["Client"] = relationship()
+
+    @property
+    def client_name(self) -> str | None:
+        return self.client.name if self.client is not None else None
 
 
 class OrderItem(Base):
@@ -107,6 +113,7 @@ class Supply(Base):
     __tablename__ = "supplies"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    client_id: Mapped[int] = mapped_column(ForeignKey("clients.id"), index=True)
     wb_supply_id: Mapped[str | None] = mapped_column(String(64), unique=True, index=True)
     status: Mapped[SupplyStatus] = mapped_column(default=SupplyStatus.OPEN, index=True)
     closed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
@@ -118,6 +125,11 @@ class Supply(Base):
     boxes: Mapped[list["SupplyBox"]] = relationship(
         back_populates="supply", cascade="all, delete-orphan"
     )
+    client: Mapped["Client"] = relationship()
+
+    @property
+    def client_name(self) -> str | None:
+        return self.client.name if self.client is not None else None
 
 
 class SupplyBox(Base):

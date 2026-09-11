@@ -34,6 +34,11 @@ services:
       WB_API_TOKEN: ${WB_API_TOKEN:-}
       WB_API_BASE: ${WB_API_BASE:-https://marketplace-api.wildberries.ru}
       WB_WAREHOUSE_ID: ${WB_WAREHOUSE_ID:-}
+      # Ключ шифрования API-ключей клиентов (Fernet). Обязателен: без него миграция
+      # клиентов создаст «Основной кабинет» без ключа WB, а новые ключи не сохранятся.
+      # Потеря ключа = ключи всех клиентов вводятся заново.
+      CLIENT_SECRETS_KEY: ${CLIENT_SECRETS_KEY:?set CLIENT_SECRETS_KEY in App Platform variables}
+      DEFAULT_CLIENT_NAME: ${DEFAULT_CLIENT_NAME:-Основной кабинет}
     # Миграции прогоняем перед стартом сервера (одна реплика).
     command: >
       sh -c "python -m alembic upgrade head &&

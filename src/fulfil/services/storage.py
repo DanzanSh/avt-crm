@@ -27,6 +27,7 @@ from fulfil.errors import (
     ZoneCodeNotLatinError,
 )
 from fulfil.models import audit
+from fulfil.models.client import Client
 from fulfil.models.product import Product
 from fulfil.models.storage import Cell, CellAllowedBarcode, CellStatus, Rack, Shelf, Zone
 from fulfil.models.stock import StockByCell
@@ -659,6 +660,7 @@ def get_cell_map(db: Session) -> dict:
     # карта тянет все места сразу. Места без остатка → qty: 0.
     cell_ids = [c.id for c in cells]
     qty_by_cell: dict[int, int] = {}
+    client_by_cell: dict[int, dict] = {}
     if cell_ids:
         qty_by_cell = {
             cid: int(total or 0)
@@ -666,6 +668,18 @@ def get_cell_map(db: Session) -> dict:
                 select(StockByCell.cell_id, func.sum(StockByCell.qty))
                 .where(StockByCell.cell_id.in_(cell_ids))
                 .group_by(StockByCell.cell_id)
+            ).all()
+        }
+        # Клиент места — клиент товара, лежащего в нём (в ячейке всегда один SKU,
+        # значит и один клиент). Один агрегирующий запрос рядом с qty_by_cell (Этап 1, п.1.5).
+        client_by_cell = {
+            cid: {"id": client_id, "name": client_name}
+            for cid, client_id, client_name in db.execute(
+                select(StockByCell.cell_id, Product.client_id, Client.name)
+                .join(Product, Product.id == StockByCell.product_id)
+                .join(Client, Client.id == Product.client_id)
+                .where(StockByCell.cell_id.in_(cell_ids), StockByCell.qty > 0)
+                .group_by(StockByCell.cell_id, Product.client_id, Client.name)
             ).all()
         }
 
@@ -700,6 +714,8 @@ def get_cell_map(db: Session) -> dict:
                                         "address": cell.address,
                                         "barcode": cell.barcode,
                                         "qty": qty_by_cell.get(cell.id, 0),
+                                        "clientId": client_by_cell.get(cell.id, {}).get("id"),
+                                        "clientName": client_by_cell.get(cell.id, {}).get("name"),
                                         "status": cell.status.value,
                                         "blockedReason": cell.blocked_reason,
                                         "zoneCode": cell.zone_code,

@@ -34,3 +34,25 @@ def db():
         yield session
     finally:
         session.close()
+
+
+def make_client(db, name: str = "Тестовый клиент"):
+    """Плоский хелпер (не фикстура) — заводит клиента для тестов, которым нужно
+    больше одного (test_clients.py: два кабинета в одном тесте). Имя уникально
+    среди живых (uq_client_name_live), так что при повторном вызове в одном
+    тесте нужно передавать разные name."""
+    from fulfil.models.client import Client
+
+    client = Client(name=name)
+    db.add(client)
+    db.commit()
+    db.refresh(client)
+    return client
+
+
+@pytest.fixture()
+def seller(db):
+    """Клиент по умолчанию для тестов, которым нужен ровно один — Product/Order/
+    Supply/Receipt теперь требуют client_id (Этап 1). Названа НЕ `client`, чтобы
+    не путать с fastapi TestClient."""
+    return make_client(db, name="Тестовый клиент")

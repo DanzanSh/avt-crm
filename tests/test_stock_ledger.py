@@ -9,8 +9,8 @@ from fulfil.services.storage import block_cell, generate_cells, unblock_cell
 from fulfil.services.stock_ledger import apply_move
 
 
-def _make_product(db, barcode="2000000000017", name="Майка белая") -> Product:
-    p = Product(barcode=barcode, name=name)
+def _make_product(db, seller, barcode="2000000000017", name="Майка белая") -> Product:
+    p = Product(client_id=seller.id, barcode=barcode, name=name)
     db.add(p)
     db.commit()
     db.refresh(p)
@@ -20,7 +20,7 @@ def _make_product(db, barcode="2000000000017", name="Майка белая") -> 
 def _make_order(db, product: Product, qty: int):
     from fulfil.models.fbs import Order, OrderItem, OrderStatus
 
-    order = Order(wb_order_id="WB-1", status=OrderStatus.CONFIRMED)
+    order = Order(client_id=product.client_id, wb_order_id="WB-1", status=OrderStatus.CONFIRMED)
     db.add(order)
     db.flush()
     db.add(OrderItem(order_id=order.id, product_id=product.id, barcode=product.barcode, qty=qty))
@@ -29,8 +29,8 @@ def _make_order(db, product: Product, qty: int):
     return order
 
 
-def test_apply_move_rejects_negative_result(db):
-    product = _make_product(db)
+def test_apply_move_rejects_negative_result(db, seller):
+    product = _make_product(db, seller)
     [cell] = generate_cells(db, "A", racks=1, cells_per_rack=1)
     place_stock(db, product, cell, 5)
 
@@ -38,10 +38,10 @@ def test_apply_move_rejects_negative_result(db):
         apply_move(db, product=product, cell=cell, qty_delta=-10, reason=MoveReason.ADJUST, actor="tester")
 
 
-def test_cell_returns_to_free_after_full_pick(db):
+def test_cell_returns_to_free_after_full_pick(db, seller):
     """Дефект №1: после подбора ячейка должна вернуться в free, а не остаться occupied
     навсегда (FEATURES-PLAN.md, этап 0.3)."""
-    product = _make_product(db)
+    product = _make_product(db, seller)
     [cell] = generate_cells(db, "A", racks=1, cells_per_rack=1)
     place_stock(db, product, cell, 20)
     assert cell.status == CellStatus.OCCUPIED
@@ -55,10 +55,10 @@ def test_cell_returns_to_free_after_full_pick(db):
     assert cell.status == CellStatus.FREE
 
 
-def test_unblock_cell_with_stock_becomes_occupied_not_free(db):
+def test_unblock_cell_with_stock_becomes_occupied_not_free(db, seller):
     """Дефект №2: unblock_cell на непустой ячейке не должен ставить free — иначе она
     попадает в список свободных для приёмки (FEATURES-PLAN.md, этап 0.3)."""
-    product = _make_product(db)
+    product = _make_product(db, seller)
     [cell] = generate_cells(db, "A", racks=1, cells_per_rack=1)
     place_stock(db, product, cell, 10)
     block_cell(db, cell, "плановая проверка")
@@ -69,19 +69,19 @@ def test_unblock_cell_with_stock_becomes_occupied_not_free(db):
     assert cell.status == CellStatus.OCCUPIED
 
 
-def test_unblock_cell_without_stock_becomes_free(db):
+def test_unblock_cell_without_stock_becomes_free(db, seller):
     [cell] = generate_cells(db, "A", racks=1, cells_per_rack=1)
     block_cell(db, cell, "плановая проверка")
     unblock_cell(db, cell)
     assert cell.status == CellStatus.FREE
 
 
-def test_apply_move_writes_actor_and_comment(db):
+def test_apply_move_writes_actor_and_comment(db, seller):
     from sqlalchemy import select
 
     from fulfil.models.stock import StockMove
 
-    product = _make_product(db)
+    product = _make_product(db, seller)
     [cell] = generate_cells(db, "A", racks=1, cells_per_rack=1)
     apply_move(
         db, product=product, cell=cell, qty_delta=10, reason=MoveReason.ADJUST,

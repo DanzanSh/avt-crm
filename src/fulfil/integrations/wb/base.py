@@ -11,6 +11,7 @@ from typing import Protocol, TypedDict
 class WbProductCard(TypedDict):
     nmId: int
     imtId: int
+    chrtId: int | None  # id размера карточки — Этап 1: товар = размер, а не карточка целиком
     vendorCode: str
     barcode: str
     name: str
@@ -45,6 +46,11 @@ class WbSticker(TypedDict):
 
 
 class WBClient(Protocol):
+    def ping(self) -> dict:
+        """Best-effort проверка подключения — GET /ping на каждом хосте API клиента.
+        Возвращает {"marketplace": {"ok": bool, "error": str|None}, "content": {...}}."""
+        ...
+
     def get_product_cards(self, cursor: WbCursor | None = None) -> WbCardsPage: ...
 
     def update_fbs_stock(self, warehouse_id: str, barcode: str, qty: int) -> dict: ...

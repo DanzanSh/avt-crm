@@ -102,14 +102,30 @@ class NotFoundError(AppError):
 
 
 class AmbiguousCodeError(AppError):
-    """400 — сырой и исправленный по раскладке коды дают разные сущности."""
+    """400/409 — один и тот же код указывает на разные сущности.
 
-    def __init__(self, detail: str = "Код неоднозначен после исправления раскладки."):
+    Два случая используют этот же guard (Этап 1, п.1.4 — «не плодить параллельных
+    механизмов»): (а) сырой код и код после исправления раскладки — разные сущности;
+    (б) баркод найден у нескольких клиентов сразу и клиент не указан явно — тогда
+    candidates несёт список клиентов-кандидатов, а статус повышается до 409
+    (конфликт данных, а не ошибка ввода)."""
+
+    def __init__(
+        self,
+        detail: str = "Код неоднозначен после исправления раскладки.",
+        *,
+        candidates: list[dict] | None = None,
+    ):
         super().__init__(
             detail,
-            status_code=status.HTTP_400_BAD_REQUEST,
-            reason_code="ambiguous_code",
-            what_to_do="Отсканируйте код ещё раз или введите вручную.",
+            status_code=status.HTTP_409_CONFLICT if candidates else status.HTTP_400_BAD_REQUEST,
+            reason_code="ambiguous_barcode" if candidates else "ambiguous_code",
+            what_to_do=(
+                "Укажите клиента явно — код есть у нескольких клиентов."
+                if candidates
+                else "Отсканируйте код ещё раз или введите вручную."
+            ),
+            extra={"candidates": candidates} if candidates else {},
         )
 
 

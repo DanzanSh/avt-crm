@@ -17,6 +17,8 @@
     <button class="btn btn-primary" id="btnSync">Синхронизировать заказы</button>
   </div>
 
+  <div id="clientFilterMount" style="margin-bottom:14px;"></div>
+
   <div id="body">Загрузка…</div>
 
   <script src="/js/sidebar.js"></script>
@@ -37,7 +39,8 @@
     async function load() {
       const body = document.getElementById('body');
       try {
-        const orders = await Fulfil.api('GET', '/fbs/orders');
+        const q = Fulfil.clientFilter.clientId ? `?client_id=${Fulfil.clientFilter.clientId}` : '';
+        const orders = await Fulfil.api('GET', '/fbs/orders' + q);
         if (!orders.length) {
           body.innerHTML = '<div class="empty-state">Заказов пока нет — синхронизируйте с WB.</div>';
           return;
@@ -53,6 +56,7 @@
             return `
           <div class="list-card">
             <div class="order-id">${Fulfil.esc(o.wbOrderId)}</div>
+            <span class="badge badge-muted">${Fulfil.esc(o.clientName || '')}</span>
             <span class="badge ${cls}">${label}</span>
             <div class="list-card__meta">${o.items.length} ${Fulfil.plural(o.items.length, 'позиция', 'позиции', 'позиций')}</div>
             ${actions ? `<div class="card-actions">${actions}</div>` : ''}
@@ -86,15 +90,23 @@
 
     document.getElementById('btnSync').addEventListener('click', async () => {
       try {
-        const res = await Fulfil.api('POST', '/fbs/orders/sync');
-        Fulfil.toast(`Новых заказов: ${res.created}`);
+        const clientId = Fulfil.clientFilter.clientId;
+        const res = await Fulfil.api('POST', '/fbs/orders/sync' + (clientId ? `?client_id=${clientId}` : ''));
+        if (!res.results.length) {
+          Fulfil.toast('Нет клиентов с заданным ключом API для синхронизации', 'error');
+        } else {
+          res.results.forEach((r) => {
+            const msg = r.error ? `${r.clientName}: ошибка — ${r.error}` : `${r.clientName}: новых заказов ${r.created}`;
+            Fulfil.toast(msg, r.error ? 'error' : 'success');
+          });
+        }
         load();
       } catch (err) {
         Fulfil.toast(Fulfil.errorText(err), 'error');
       }
     });
 
-    load();
+    Fulfil.clientFilter.mount(document.getElementById('clientFilterMount'), load).then(load);
   </script>
 </body>
 </html>

@@ -44,6 +44,8 @@
 <body>
   <div class="page-head"><h1 class="page-title">Остатки на складе</h1></div>
 
+  <div id="clientFilterMount" style="margin-bottom:14px;"></div>
+
   <div class="tabs">
     <button class="tab-btn active" id="tabStock" data-tab="stock">Остатки</button>
     <button class="tab-btn" id="tabHistory" data-tab="history">История</button>
@@ -141,7 +143,8 @@
     async function loadStock() {
       const body = document.getElementById('stockBody');
       try {
-        const rows = await Fulfil.api('GET', '/stock');
+        const q = Fulfil.clientFilter.clientId ? `?client_id=${Fulfil.clientFilter.clientId}` : '';
+        const rows = await Fulfil.api('GET', '/stock' + q);
 
         // KPI-плитки из макета /remains. Считаются на клиенте по тем же строкам —
         // отдельной ручки сводки в API нет и она сюда не добавляется.
@@ -160,7 +163,7 @@
             (r) => `
           <tr class="row-toggle" data-product-id="${r.productId}">
             <td><span class="chevron">▶</span></td>
-            <td>${Fulfil.esc(r.productName)}</td>
+            <td>${Fulfil.esc(r.productName)} <span class="badge badge-muted">${Fulfil.esc(r.clientName || '')}</span></td>
             <td style="font-family:var(--mono)">${Fulfil.esc(r.barcode)}</td>
             <td class="num">${r.total}</td>
             <td class="num">${r.transferredFbs}</td>
@@ -392,7 +395,7 @@
 
     document.getElementById('btnHistFilter').addEventListener('click', loadHistory);
 
-    loadStock();
+    Fulfil.clientFilter.mount(document.getElementById('clientFilterMount'), loadStock).then(loadStock);
   </script>
 </body>
 </html>

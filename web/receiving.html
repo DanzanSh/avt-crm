@@ -9,9 +9,18 @@
   <script src="/js/scan-layout.js"></script>
   <script src="/js/scanner.js"></script>
   <style>
-    .scan-panel { max-width: 480px; display: flex; flex-direction: column; gap: 12px; padding: 18px; margin-bottom: 18px; }
-    .step-hint { color: var(--muted); font-size: 14px; line-height: 1.2; }
-    .scan-input { font-family: var(--mono); font-size: 23px; text-align: center; }
+    /* Панель скана залита синим секции карты склада (.zone-block), чтобы главное
+       действие страницы читалось как отдельный блок. Само поле ввода остаётся
+       белым: крупный моноширинный скан на синем читается плохо. */
+    .scan-panel {
+      max-width: 480px; display: flex; flex-direction: column; gap: 12px;
+      padding: 18px; margin-bottom: 18px;
+      background: rgba(53, 96, 189, 0.5);
+    }
+    /* Подписи на заливке: --muted (#8792a3) на ней даёт контраст ~1.9:1. */
+    .step-hint { color: rgba(24, 34, 51, 0.75); font-size: 14px; line-height: 1.2; }
+    [data-theme="dark"] .step-hint { color: rgba(229, 231, 235, 0.85); }
+    .scan-input { font-family: var(--mono); font-size: 23px; text-align: center; background: var(--card); border-color: transparent; }
     .product-preview {
       display: flex;
       justify-content: space-between;
@@ -20,7 +29,7 @@
       padding: 10px;
       font-size: 16px;
       color: var(--text-2);
-      background: var(--bg2);
+      background: var(--card);
       border-radius: var(--radius-sm);
     }
     .qty-row { display: flex; gap: 8px; align-items: center; }
@@ -37,11 +46,15 @@
       color: var(--text-2);
     }
     .log-item:last-child { border-bottom: none; }
-    .scanner-note { font-size: 14px; color: var(--muted); line-height: 1.2; }
+    /* Тоже на синей заливке .scan-panel — см. .step-hint выше. */
+    .scanner-note { font-size: 14px; color: rgba(24, 34, 51, 0.7); line-height: 1.2; }
+    [data-theme="dark"] .scanner-note { color: rgba(229, 231, 235, 0.75); }
   </style>
 </head>
 <body>
   <div class="page-head"><h1 class="page-title">Приёмка товара</h1></div>
+
+  <div id="clientFilterMount" style="margin-bottom:14px;"></div>
 
   <div class="card scan-panel">
     <div class="step-hint" id="stepHint">Сейчас нужно: отсканировать баркод товара</div>
@@ -103,6 +116,19 @@
       input.value = '';
     }
 
+    // Если в фильтре выбраны «Все клиенты» — баркод, отсканированный без указания
+    // клиента, может оказаться неоднозначным (есть у нескольких сразу, Этап 1, п.1.4).
+    // Просим выбрать клиента ДО скана, а не разбираться с 409 постфактум.
+    function refreshClientGate() {
+      const hasClient = !!Fulfil.clientFilter.clientId;
+      input.disabled = !hasClient;
+      if (!hasClient) {
+        hint.textContent = 'Сначала выберите клиента вверху страницы';
+      } else if (stage === 'product') {
+        hint.textContent = 'Сейчас нужно: отсканировать баркод товара';
+      }
+    }
+
     function fmtTime(iso) {
       if (!iso) return '';
       const d = new Date(iso);
@@ -116,7 +142,9 @@
     function renderRow(row, ok = true) {
       const div = document.createElement('div');
       div.className = 'log-item';
-      const text = ok ? `${row.productName} · ${row.qty} шт · ${row.cellAddress}` : String(row);
+      const text = ok
+        ? `${row.productName} · ${row.qty} шт · ${row.cellAddress}${row.clientName ? ' · ' + row.clientName : ''}`
+        : String(row);
       const time = ok ? fmtTime(row.createdAt) : '';
       div.innerHTML =
         `<span>${Fulfil.esc(text)}</span>` +
@@ -127,7 +155,8 @@
 
     async function loadHistory() {
       try {
-        const rows = await Fulfil.api('GET', '/receiving/history?limit=50');
+        const q = Fulfil.clientFilter.clientId ? `&client_id=${Fulfil.clientFilter.clientId}` : '';
+        const rows = await Fulfil.api('GET', '/receiving/history?limit=50' + q);
         log.innerHTML = '';
         // сервер отдаёт newest-first; prepend в обратном порядке сохраняет его
         for (let i = rows.length - 1; i >= 0; i--) renderRow(rows[i], true);
@@ -138,7 +167,8 @@
 
     async function classify(code) {
       try {
-        return await Fulfil.api('POST', '/scan/resolve', { code });
+        const clientId = Fulfil.clientFilter.clientId || undefined;
+        return await Fulfil.api('POST', '/scan/resolve', { code, clientId });
       } catch (err) {
         Scanner.beep('error');
         Fulfil.toast(Fulfil.errorText(err), 'error');
@@ -182,14 +212,15 @@
       placing = true;
       const idempotencyKey = Fulfil.newIdempotencyKey();
       try {
+        const clientId = Fulfil.clientFilter.clientId || undefined;
         const res = await Fulfil.api(
           'POST',
           '/receiving/place',
-          { productBarcode: pendingProduct.barcode, cellCode: result.cell.address, qty: pendingQty },
+          { productBarcode: pendingProduct.barcode, cellCode: result.cell.address, qty: pendingQty, clientId },
           { 'X-Idempotency-Key': idempotencyKey }
         );
         Scanner.beep('ok');
-        Fulfil.toast(`${res.qty} шт «${res.productName}» → ${res.cellAddress}`);
+        Fulfil.toast(`${res.qty} шт «${res.productName}» (${res.clientName}) → ${res.cellAddress}`);
         renderRow(res, true);
         resetToProductStage();
       } catch (err) {
@@ -205,6 +236,11 @@
 
     async function handleCode(code) {
       if (!code) return;
+      if (!Fulfil.clientFilter.clientId) {
+        Scanner.beep('error');
+        Fulfil.toast('Сначала выберите клиента вверху страницы', 'error');
+        return;
+      }
       if (stage === 'product') await handleProductCode(code);
       else await handleCellCode(code);
     }
@@ -238,7 +274,13 @@
     });
 
     // История приёмок постоянна — тянется из БД, переживает F5.
-    loadHistory();
+    Fulfil.clientFilter.mount(document.getElementById('clientFilterMount'), () => {
+      refreshClientGate();
+      loadHistory();
+    }).then(() => {
+      refreshClientGate();
+      loadHistory();
+    });
   </script>
 </body>
 </html>

@@ -4,8 +4,9 @@ from sqlalchemy.orm import Session
 
 from fulfil.auth import get_current_user
 from fulfil.db import get_db
-from fulfil.errors import NotFoundError
+from fulfil.errors import AppError, NotFoundError
 from fulfil.integrations.wb import get_wb_client
+from fulfil.models.client import Client
 from fulfil.models.product import Product
 from fulfil.schemas.product import (
     ProductCreateRequest,
@@ -13,6 +14,7 @@ from fulfil.schemas.product import (
     ProductUpdateRequest,
     RevertManualFieldRequest,
 )
+from fulfil.services import clients as clients_service
 from fulfil.services import products as products_service
 
 router = APIRouter(prefix="/products", tags=["products"], dependencies=[Depends(get_current_user)])
@@ -24,15 +26,23 @@ def _actor(user: dict) -> str:
 
 @router.get("", response_model=list[ProductOut])
 def list_products(
-    search: str | None = None, include_archived: bool = False, db: Session = Depends(get_db)
+    search: str | None = None, include_archived: bool = False, client_id: int | None = None,
+    name: str | None = None, size: str | None = None, color: str | None = None,
+    brand: str | None = None, db: Session = Depends(get_db),
 ) -> list[Product]:
-    stmt = select(Product).order_by(Product.id.desc())
-    if not include_archived:
-        stmt = stmt.where(Product.archived_at.is_(None))
-    if search:
-        like = f"%{search}%"
-        stmt = stmt.where(Product.name.ilike(like) | Product.barcode.ilike(like))
-    return list(db.scalars(stmt))
+    return products_service.list_products(
+        db, search=search, include_archived=include_archived, client_id=client_id,
+        name=name, size=size, color=color, brand=brand,
+    )
+
+
+# Объявлено ДО "/{product_id}": иначе FastAPI разберёт "filter-options" как
+# product_id и вернёт 422 вместо списка значений.
+@router.get("/filter-options")
+def filter_options(
+    client_id: int | None = None, include_archived: bool = False, db: Session = Depends(get_db)
+) -> dict[str, list[str]]:
+    return products_service.filter_options(db, client_id=client_id, include_archived=include_archived)
 
 
 def _get_product(db: Session, product_id: int) -> Product:
@@ -51,8 +61,9 @@ def get_product(product_id: int, db: Session = Depends(get_db)) -> Product:
 def create_product(
     body: ProductCreateRequest, db: Session = Depends(get_db), user: dict = Depends(get_current_user)
 ) -> Product:
+    clients_service.get_live_client_or_404(db, body.client_id)
     return products_service.create_product(
-        db, barcode=body.barcode, name=body.name, brand=body.brand, size=body.size,
+        db, client_id=body.client_id, barcode=body.barcode, name=body.name, brand=body.brand, size=body.size,
         color=body.color, vendor_code=body.vendor_code, image_url=body.image_url, actor=_actor(user),
     )
 
@@ -90,13 +101,33 @@ def restore_product(product_id: int, db: Session = Depends(get_db), user: dict =
 
 
 @router.post("/sync-from-wb")
-def sync_from_wb(full: bool = False, db: Session = Depends(get_db)) -> dict:
-    """Синхронизация карточек WB. По умолчанию инкрементальная (с сохранённого
-    курсора) — это и есть кнопка «Синхронизировать с WB». full=true в UI не
-    выведен, оставлен для ручного/операционного вызова: игнорирует курсор и
-    заново проходит весь каталог."""
-    wb_client = get_wb_client()
-    return products_service.sync_products_from_wb(db, wb_client, full=full)
+def sync_from_wb(client_id: int | None = None, full: bool = False, db: Session = Depends(get_db)) -> dict:
+    """Синхронизация карточек WB. client_id не передан — синкает по очереди всех
+    активных клиентов с заданным ключом API; ошибка одного клиента (WbApiError) не
+    останавливает остальных (Этап 1, п.1.4). full=true — игнорировать сохранённый
+    курсор и заново пройти весь каталог."""
+    if client_id is not None:
+        client = clients_service.get_live_client_or_404(db, client_id)
+        targets = [client]
+    else:
+        targets = list(
+            db.scalars(
+                select(Client).where(Client.archived_at.is_(None), Client.wb_api_key_enc.is_not(None))
+            )
+        )
+
+    results = []
+    for client in targets:
+        try:
+            wb_client = get_wb_client(client)
+            outcome = products_service.sync_products_from_wb(db, client, wb_client, full=full)
+            results.append(
+                {"clientId": client.id, "clientName": client.name, "imported": outcome["imported"], "error": None}
+            )
+        except AppError as exc:  # WbApiError и ошибки расшифровки ключа — не рушат синк остальных
+            db.rollback()  # недописанное по этому клиенту не должно уехать с коммитом следующего
+            results.append({"clientId": client.id, "clientName": client.name, "imported": 0, "error": exc.detail})
+    return {"results": results}
 
 
 @router.post("/{product_id}/generate-internal-barcode", response_model=ProductOut)

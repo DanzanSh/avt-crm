@@ -15,8 +15,8 @@ def test_validate_gtin_rejects_bad_input():
     assert not validate_gtin("01234567890123")  # 14 цифр с ведущим нулём — тот же баг эталона
 
 
-def test_generate_internal_barcode_format(db):
-    p = Product(barcode="TEMP", name="Товар без ШК")
+def test_generate_internal_barcode_format(db, seller):
+    p = Product(client_id=seller.id, barcode="TEMP", name="Товар без ШК")
     db.add(p)
     db.commit()
     db.refresh(p)

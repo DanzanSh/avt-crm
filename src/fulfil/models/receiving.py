@@ -17,6 +17,7 @@ class Receipt(Base):
     __tablename__ = "receipts"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    client_id: Mapped[int] = mapped_column(ForeignKey("clients.id"), index=True)
     number: Mapped[str] = mapped_column(String(32), unique=True, index=True)
     status: Mapped[ReceiptStatus] = mapped_column(default=ReceiptStatus.DRAFT, index=True)
     created_at: Mapped[dt.datetime] = mapped_column(
@@ -27,6 +28,11 @@ class Receipt(Base):
     lines: Mapped[list["ReceiptLine"]] = relationship(
         back_populates="receipt", cascade="all, delete-orphan"
     )
+    client: Mapped["Client"] = relationship()
+
+    @property
+    def client_name(self) -> str | None:
+        return self.client.name if self.client is not None else None
 
 
 class ReceiptLine(Base):

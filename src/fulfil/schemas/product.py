@@ -5,6 +5,8 @@ from fulfil.schemas.common import CamelModel
 
 class ProductOut(CamelModel):
     id: int
+    client_id: int
+    client_name: str | None = None
     barcode: str
     name: str
     brand: str | None = None
@@ -13,11 +15,13 @@ class ProductOut(CamelModel):
     vendor_code: str | None = None
     image_url: str | None = None
     wb_nm_id: int | None = None
+    wb_chrt_id: int | None = None
     manual_fields: list[str] = []
     archived_at: dt.datetime | None = None
 
 
 class ProductCreateRequest(CamelModel):
+    client_id: int
     barcode: str
     name: str
     brand: str | None = None

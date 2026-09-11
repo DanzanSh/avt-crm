@@ -21,10 +21,10 @@ from fulfil.services.storage import (
 )
 
 
-def _make_product(db, barcode="2000000000017", name="Майка белая"):
+def _make_product(db, seller, barcode="2000000000017", name="Майка белая"):
     from fulfil.models.product import Product
 
-    p = Product(barcode=barcode, name=name)
+    p = Product(client_id=seller.id, barcode=barcode, name=name)
     db.add(p)
     db.commit()
     db.refresh(p)
@@ -60,7 +60,7 @@ def test_validate_zone_code_latin_rejects_cyrillic_with_suggestion():
     assert exc_info.value.extra["suggestion"] == "A"
 
 
-def test_generate_cells_creates_expected_count(db):
+def test_generate_cells_creates_expected_count(db, seller):
     cells = generate_cells(db, "A", racks=2, cells_per_rack=3, shelves_per_rack=2)
     assert len(cells) == 12
     addresses = sorted(c.address for c in cells)
@@ -72,7 +72,7 @@ def test_generate_cells_creates_expected_count(db):
     ]
 
 
-def test_generate_cells_creates_shelves(db):
+def test_generate_cells_creates_shelves(db, seller):
     from fulfil.models.storage import Shelf
 
     generate_cells(db, "A", racks=2, cells_per_rack=3, shelves_per_rack=2)
@@ -81,7 +81,7 @@ def test_generate_cells_creates_shelves(db):
     assert all(s.places_count == 3 for s in shelves)
 
 
-def test_generate_cells_is_additive_not_duplicating(db):
+def test_generate_cells_is_additive_not_duplicating(db, seller):
     generate_cells(db, "A", racks=1, cells_per_rack=2)
     second = generate_cells(db, "A", racks=1, cells_per_rack=3)
     # первые 2 места уже существовали — создаётся только недостающее третье
@@ -89,12 +89,12 @@ def test_generate_cells_is_additive_not_duplicating(db):
     assert second[0].address == "A-1-1-3"
 
 
-def test_generate_cells_enforces_limit(db):
+def test_generate_cells_enforces_limit(db, seller):
     with pytest.raises(NotFoundError):
         generate_cells(db, "A", racks=10, cells_per_rack=MAX_CELLS_PER_GENERATE)
 
 
-def test_generate_cells_rejects_cyrillic_zone(db):
+def test_generate_cells_rejects_cyrillic_zone(db, seller):
     with pytest.raises(ZoneCodeNotLatinError):
         generate_cells(db, "А", racks=1, cells_per_rack=1)
 
@@ -169,7 +169,7 @@ def test_fit_font_size_shrinks_for_long_address():
     assert long_addr >= cell_labels._ADDRESS_MIN_FONT
 
 
-def test_resolve_location_by_barcode_or_address(db):
+def test_resolve_location_by_barcode_or_address(db, seller):
     [cell] = generate_cells(db, "A", racks=1, cells_per_rack=1)
 
     assert resolve_location(db, cell.barcode).id == cell.id
@@ -178,24 +178,24 @@ def test_resolve_location_by_barcode_or_address(db):
     assert resolve_location(db, str(cell.id)).id == cell.id
 
 
-def test_resolve_location_accepts_cyrillic_homoglyph_address(db):
+def test_resolve_location_accepts_cyrillic_homoglyph_address(db, seller):
     [cell] = generate_cells(db, "A", racks=1, cells_per_rack=1)
     assert resolve_location(db, "А-1-1-1").id == cell.id  # 'А' кириллическая
 
 
-def test_resolve_location_not_found(db):
+def test_resolve_location_not_found(db, seller):
     with pytest.raises(NotFoundError):
         resolve_location(db, "CELL-999999")
 
 
-def test_create_zone_new_zone_is_last_by_position(db):
+def test_create_zone_new_zone_is_last_by_position(db, seller):
     create_zone(db, "A", None, actor="tester")
     create_zone(db, "B", None, actor="tester")
     zones = list_zones(db)
     assert [z.code for z in zones] == ["A", "B"]
 
 
-def test_create_zone_duplicate_rejected(db):
+def test_create_zone_duplicate_rejected(db, seller):
     from fulfil.errors import AppError
 
     create_zone(db, "A", None, actor="tester")
@@ -203,7 +203,7 @@ def test_create_zone_duplicate_rejected(db):
         create_zone(db, "A", None, actor="tester")
 
 
-def test_cell_map_shows_empty_zone(db):
+def test_cell_map_shows_empty_zone(db, seller):
     """Дефект №6: карта строится от зон, не от ячеек — пустая зона видна сразу
     после создания (FEATURES-PLAN.md, этап 1)."""
     create_zone(db, "A", None, actor="tester")
@@ -212,8 +212,8 @@ def test_cell_map_shows_empty_zone(db):
     assert data["zones"][0]["racks"] == []
 
 
-def test_delete_zone_blocked_when_cell_occupied(db):
-    product = _make_product(db)
+def test_delete_zone_blocked_when_cell_occupied(db, seller):
+    product = _make_product(db, seller)
     [cell] = generate_cells(db, "A", racks=1, cells_per_rack=1)
     place_stock(db, product, cell, 5)
     zone = list_zones(db)[0]
@@ -223,7 +223,7 @@ def test_delete_zone_blocked_when_cell_occupied(db):
     assert exc_info.value.extra["blockingCells"][0]["address"] == "A-1-1-1"
 
 
-def test_delete_zone_cascades_when_empty(db):
+def test_delete_zone_cascades_when_empty(db, seller):
     generate_cells(db, "A", racks=1, cells_per_rack=2)
     zone = list_zones(db)[0]
     delete_zone(db, zone, actor="tester")
@@ -233,7 +233,7 @@ def test_delete_zone_cascades_when_empty(db):
         resolve_location(db, "A-1-1-1")
 
 
-def test_delete_rack_blocked_when_cell_blocked(db):
+def test_delete_rack_blocked_when_cell_blocked(db, seller):
     from fulfil.services.storage import block_cell
 
     [cell] = generate_cells(db, "A", racks=1, cells_per_rack=1)
@@ -244,14 +244,14 @@ def test_delete_rack_blocked_when_cell_blocked(db):
         delete_rack(db, rack, actor="tester")
 
 
-def test_delete_cell_ok_when_free(db):
+def test_delete_cell_ok_when_free(db, seller):
     [cell] = generate_cells(db, "A", racks=1, cells_per_rack=1)
     delete_cell(db, cell, actor="tester")
     with pytest.raises(NotFoundError):
         resolve_location(db, cell.address)
 
 
-def test_rename_zone_rewrites_cell_addresses(db):
+def test_rename_zone_rewrites_cell_addresses(db, seller):
     generate_cells(db, "A", racks=1, cells_per_rack=2)
     zone = list_zones(db)[0]
     rename_zone(db, zone, "Z", None, actor="tester")
@@ -261,7 +261,7 @@ def test_rename_zone_rewrites_cell_addresses(db):
     assert cell.zone_code == "Z"
 
 
-def test_generate_cells_after_delete_reuses_address(db):
+def test_generate_cells_after_delete_reuses_address(db, seller):
     """Частичный уникальный индекс: после мягкого удаления адрес можно занять заново."""
     [cell] = generate_cells(db, "A", racks=1, cells_per_rack=1)
     delete_cell(db, cell, actor="tester")
@@ -270,7 +270,7 @@ def test_generate_cells_after_delete_reuses_address(db):
     assert new_cell.id != cell.id
 
 
-def test_get_cell_map_has_shelves_level(db):
+def test_get_cell_map_has_shelves_level(db, seller):
     generate_cells(db, "A", racks=1, cells_per_rack=2, shelves_per_rack=2)
     data = get_cell_map(db)
     rack = data["zones"][0]["racks"][0]
@@ -281,7 +281,7 @@ def test_get_cell_map_has_shelves_level(db):
     assert shelf["cells"][0]["shelfNo"] == 1
 
 
-def test_resize_shelf_grows_and_shrinks(db):
+def test_resize_shelf_grows_and_shrinks(db, seller):
     from fulfil.services.storage import get_live_shelf, resize_shelf
     from fulfil.models.storage import Shelf
 
@@ -296,11 +296,11 @@ def test_resize_shelf_grows_and_shrinks(db):
         resolve_location(db, "A-1-1-5")
 
 
-def test_delete_shelf_blocked_when_cell_has_stock(db):
+def test_delete_shelf_blocked_when_cell_has_stock(db, seller):
     from fulfil.services.storage import delete_shelf, get_live_shelf
     from fulfil.models.storage import Shelf
 
-    product = _make_product(db)
+    product = _make_product(db, seller)
     [cell] = generate_cells(db, "A", racks=1, cells_per_rack=1)
     place_stock(db, product, cell, 3)
     shelf_id = db.query(Shelf).filter(Shelf.deleted_at.is_(None)).one().id

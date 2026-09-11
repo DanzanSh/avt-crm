@@ -11,11 +11,14 @@ from sqlalchemy.orm import Session
 
 from fulfil.errors import AppError, NotFoundError
 from fulfil.integrations.wb.base import WBClient
+from fulfil.models.client import Client
 from fulfil.models.fbs import Order, OrderItem, OrderStatus
 from fulfil.models.product import Product
 
 
-def sync_orders_from_wb(db: Session, wb_client: WBClient) -> list[Order]:
+def sync_orders_from_wb(db: Session, client: Client, wb_client: WBClient) -> list[Order]:
+    """Синхронизация заказов ОДНОГО клиента — товар в позициях ищется в пределах
+    этого же клиента (Этап 1, п.1.1)."""
     wb_orders = wb_client.get_new_orders()
     created: list[Order] = []
     for wo in wb_orders:
@@ -24,6 +27,7 @@ def sync_orders_from_wb(db: Session, wb_client: WBClient) -> list[Order]:
             continue
 
         order = Order(
+            client_id=client.id,
             wb_order_id=wo["orderId"],
             wb_supply_id=wo.get("supplyId"),
             status=OrderStatus.NEW,
@@ -34,7 +38,9 @@ def sync_orders_from_wb(db: Session, wb_client: WBClient) -> list[Order]:
         db.flush()
 
         for it in wo.get("items", []):
-            product = db.scalar(select(Product).where(Product.barcode == it["barcode"]))
+            product = db.scalar(
+                select(Product).where(Product.client_id == client.id, Product.barcode == it["barcode"])
+            )
             if product is None:
                 continue  # товар не синхронизирован из каталога — пропускаем строку
             db.add(

@@ -15,7 +15,7 @@ router = APIRouter(prefix="/scan", tags=["scan"], dependencies=[Depends(get_curr
 def resolve(body: ScanResolveRequest, db: Session = Depends(get_db)) -> dict:
     """Классифицирует отсканированный код на сервере — фронт больше не решает по
     стадии экрана, что это (FEATURES-PLAN.md, этап 4.3)."""
-    kind, entity = resolve_scan(db, body.code)
+    kind, entity = resolve_scan(db, body.code, client_id=body.client_id)
     if kind == "product":
         return {"kind": "product", "product": ProductOut.model_validate(entity).model_dump(by_alias=True)}
     return {"kind": "cell", "cell": CellOut.model_validate(entity).model_dump(by_alias=True)}

@@ -1,5 +1,7 @@
 """Инкрементальная синхронизация карточек WB: сохранение курсора между запусками,
-пагинация по total < limit, матчинг по wb_nm_id."""
+пагинация по total < limit, матчинг по (client_id, wb_chrt_id) — Этап 1: товар =
+размер карточки, matching по chrtId заменил старый matching по nmId (у карточки
+несколько размеров = несколько chrtId)."""
 
 from sqlalchemy import select
 
@@ -17,10 +19,10 @@ class _PagedWBClient:
     def __init__(self):
         self.calls: list = []
         page1 = [
-            {"nmId": i, "barcode": f"200000000{i:04d}", "name": f"Товар {i}"}
+            {"nmId": i, "chrtId": i, "barcode": f"200000000{i:04d}", "name": f"Товар {i}"}
             for i in range(1, 4)
         ]
-        page2 = [{"nmId": 4, "barcode": "2000000000004", "name": "Товар 4"}]
+        page2 = [{"nmId": 4, "chrtId": 4, "barcode": "2000000000004", "name": "Товар 4"}]
         self._pages = [
             {"cards": page1, "cursor": {"updatedAt": "2026-01-02T00:00:00Z", "nmID": 3, "total": _LIMIT}},
             {"cards": page2, "cursor": {"updatedAt": "2026-01-03T00:00:00Z", "nmID": 4, "total": 1}},
@@ -32,14 +34,14 @@ class _PagedWBClient:
         return self._pages[min(idx, 1)]
 
 
-def test_first_sync_persists_cursor(db):
+def test_first_sync_persists_cursor(db, seller):
     wb = _PagedWBClient()
-    result = sync_products_from_wb(db, wb)
+    result = sync_products_from_wb(db, seller, wb)
 
     assert result["imported"] == 4
     assert result["cursor"] == {"updatedAt": "2026-01-03T00:00:00Z", "nmID": 4}
 
-    state = db.get(IntegrationState, "wb.product_cards")
+    state = db.get(IntegrationState, f"wb.product_cards:{seller.id}")
     assert state is not None
     assert state.cursor == {"updatedAt": "2026-01-03T00:00:00Z", "nmID": 4}
     # первый вызов без курсора, второй — с курсором первой страницы
@@ -47,36 +49,36 @@ def test_first_sync_persists_cursor(db):
     assert wb.calls[1] == {"updatedAt": "2026-01-02T00:00:00Z", "nmID": 3}
 
 
-def test_second_sync_starts_from_saved_cursor(db):
-    sync_products_from_wb(db, _PagedWBClient())
+def test_second_sync_starts_from_saved_cursor(db, seller):
+    sync_products_from_wb(db, seller, _PagedWBClient())
 
     wb2 = _PagedWBClient()
-    sync_products_from_wb(db, wb2)
+    sync_products_from_wb(db, seller, wb2)
     assert wb2.calls[0] == {"updatedAt": "2026-01-03T00:00:00Z", "nmID": 4}
 
 
-def test_full_resync_ignores_saved_cursor(db):
-    sync_products_from_wb(db, _PagedWBClient())
+def test_full_resync_ignores_saved_cursor(db, seller):
+    sync_products_from_wb(db, seller, _PagedWBClient())
 
     wb2 = _PagedWBClient()
-    sync_products_from_wb(db, wb2, full=True)
+    sync_products_from_wb(db, seller, wb2, full=True)
     assert wb2.calls[0] is None
 
 
-def test_match_by_wb_nm_id_when_barcode_changed(db):
+def test_match_by_wb_chrt_id_when_barcode_changed(db, seller):
     wb = _PagedWBClient()
-    sync_products_from_wb(db, wb)
-    count_before = db.scalar(select(Product.id).where(Product.wb_nm_id == 1))
+    sync_products_from_wb(db, seller, wb)
+    count_before = db.scalar(select(Product.id).where(Product.wb_chrt_id == 1))
     assert count_before is not None
 
     class _ChangedBarcode:
         def get_product_cards(self, cursor=None):
             return {
-                "cards": [{"nmId": 1, "barcode": "9999999999999", "name": "Товар 1 new"}],
+                "cards": [{"nmId": 1, "chrtId": 1, "barcode": "9999999999999", "name": "Товар 1 new"}],
                 "cursor": {"updatedAt": "x", "nmID": 1, "total": 0},
             }
 
-    sync_products_from_wb(db, _ChangedBarcode(), full=True)
-    rows = db.scalars(select(Product).where(Product.wb_nm_id == 1)).all()
-    assert len(rows) == 1  # не создан дубль — матч по wb_nm_id, а не по баркоду
+    sync_products_from_wb(db, seller, _ChangedBarcode(), full=True)
+    rows = db.scalars(select(Product).where(Product.wb_chrt_id == 1)).all()
+    assert len(rows) == 1  # не создан дубль — матч по (client_id, wb_chrt_id), а не по баркоду
     assert rows[0].name == "Товар 1 new"  # карточка обновлена, не продублирована

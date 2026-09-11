@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Клиенты — Fulfil</title>
+  <link rel="stylesheet" href="/css/theme.css" />
+  <script src="/js/core.js"></script>
+  <style>
+    .field-hint { font-size: 14px; color: var(--muted); margin: -4px 0 2px; }
+    /* .card из theme.css — без внутренних отступов (в отличие от .list-card),
+       поэтому карточка клиента задаёт их сама. Размеры шрифтов подтянуты
+       к «Товарам»: страница была заметно мельче соседних. */
+    .client-card { display: flex; flex-direction: column; gap: 8px; padding: 18px; }
+    .client-card + .client-card { margin-top: 10px; }
+    .client-card__head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap; }
+    .client-name { font-size: 18px; font-weight: 700; color: var(--text); }
+    .client-meta { display: flex; flex-wrap: wrap; gap: 4px 18px; font-size: 16px; }
+    .client-meta .meta-item { white-space: nowrap; }
+    .client-meta .meta-label { color: var(--muted); }
+    .client-meta .meta-value { color: var(--text-2); font-weight: 600; }
+    .key-ok { color: var(--green); }
+    .key-warn { color: var(--orange); }
+    .key-missing { color: var(--muted); }
+    .key-expired { color: var(--red); }
+    .last-error { color: var(--red); font-size: 15px; }
+    .card-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+    .modal { width: 460px; max-height: 85vh; overflow: auto; }
+    .field-row { display: flex; gap: 8px; align-items: center; }
+    .check-result { font-size: 16px; margin-top: 8px; display: flex; flex-direction: column; gap: 4px; }
+    .archived-row { opacity: .55; }
+  </style>
+</head>
+<body>
+  <div class="page-head">
+    <h1 class="page-title">Клиенты</h1>
+    <div class="toolbar">
+      <button class="btn btn-primary" id="btnNew">+ Клиент</button>
+      <label class="archived-toggle">
+        <input type="checkbox" id="showArchived" /> показать архивных
+      </label>
+    </div>
+  </div>
+
+  <div id="body">Загрузка…</div>
+
+  <script src="/js/sidebar.js"></script>
+  <script>
+    let showArchived = false;
+
+    function fmtDate(iso) {
+      if (!iso) return '';
+      const d = new Date(iso);
+      if (isNaN(d)) return '';
+      const p = (n) => String(n).padStart(2, '0');
+      return `${p(d.getDate())}.${p(d.getMonth() + 1)}.${d.getFullYear()}`;
+    }
+
+    function keyStatusHtml(c) {
+      if (!c.hasApiKey) return '<span class="key-missing">ключ не задан</span>';
+      if (c.wbTokenExpired) return `<span class="key-expired">✗ ключ истёк ${fmtDate(c.wbTokenExpiresAt)}</span>`;
+      if (c.wbTokenExpiringSoon) return `<span class="key-warn">⚠ действует до ${fmtDate(c.wbTokenExpiresAt)} — истекает скоро</span>`;
+      if (c.wbTokenExpiresAt) return `<span class="key-ok">✓ действует до ${fmtDate(c.wbTokenExpiresAt)}</span>`;
+      return '<span class="key-ok">✓ ключ задан</span>';
+    }
+
+    async function load() {
+      const body = document.getElementById('body');
+      try {
+        const q = showArchived ? '?include_archived=true' : '';
+        const clients = await Fulfil.api('GET', '/clients' + q);
+        if (!clients.length) {
+          body.innerHTML = '<div class="empty-state">Клиентов пока нет — добавьте первого.</div>';
+          return;
+        }
+        body.innerHTML = clients
+          .map((c) => {
+            const meta = [];
+            const metaItem = (label, value) =>
+              meta.push(`<span class="meta-item"><span class="meta-label">${Fulfil.esc(label)}:</span> <span class="meta-value">${Fulfil.esc(value)}</span></span>`);
+            metaItem('Склад WB', c.wbWarehouseName || c.wbWarehouseId || '—');
+            metaItem('SKU', String(c.skuCount));
+            metaItem('Штук на складе', String(c.stockQty));
+            metaItem('Активных заказов', String(c.activeOrders));
+            metaItem('Последняя синхронизация', c.lastSyncAt ? fmtDate(c.lastSyncAt) : 'ещё не было');
+
+            const actions = c.archivedAt
+              ? `<button class="btn btn-restore" data-id="${c.id}">Восстановить</button>`
+              : `<button class="btn btn-edit" data-id="${c.id}">Изменить</button>
+                 <button class="btn" data-check="${c.id}">Проверить подключение</button>
+                 <button class="btn btn-danger" data-archive="${c.id}">Архивировать</button>`;
+
+            return `
+          <div class="card client-card ${c.archivedAt ? 'archived-row' : ''}" data-id="${c.id}">
+            <div class="client-card__head">
+              <div class="client-name">${Fulfil.esc(c.name)}${c.archivedAt ? ' <span class="badge badge-muted">архив</span>' : ''}</div>
+              <div>${keyStatusHtml(c)}</div>
+            </div>
+            <div class="client-meta">${meta.join('')}</div>
+            ${c.lastSyncError ? `<div class="last-error">Ошибка синхронизации: ${Fulfil.esc(c.lastSyncError)}</div>` : ''}
+            <div class="card-actions">${actions}</div>
+            <div class="check-result" id="check-${c.id}"></div>
+          </div>`;
+          })
+          .join('');
+
+        document.querySelectorAll('[data-check]').forEach((btn) =>
+          btn.addEventListener('click', () => checkConnection(btn.dataset.check))
+        );
+        document.querySelectorAll('.btn-edit').forEach((btn) =>
+          btn.addEventListener('click', () => openEditModal(Number(btn.dataset.id)))
+        );
+        document.querySelectorAll('[data-archive]').forEach((btn) =>
+          btn.addEventListener('click', () => archiveClient(btn.dataset.archive))
+        );
+        document.querySelectorAll('.btn-restore').forEach((btn) =>
+          btn.addEventListener('click', async () => {
+            try {
+              await Fulfil.api('POST', `/clients/${btn.dataset.id}/restore`);
+              Fulfil.toast('Клиент восстановлен');
+              load();
+            } catch (err) {
+              Fulfil.toast(Fulfil.errorText(err), 'error');
+            }
+          })
+        );
+      } catch (err) {
+        body.innerHTML = `<div class="empty-state">${Fulfil.esc(Fulfil.errorText(err))}</div>`;
+      }
+    }
+
+    async function checkConnection(id) {
+      const area = document.getElementById('check-' + id);
+      area.innerHTML = 'Проверяем…';
+      try {
+        const res = await Fulfil.api('POST', `/clients/${id}/check`);
+        area.innerHTML = Object.entries(res)
+          .map(([host, r]) => `<span style="color:${r.ok ? 'var(--green)' : 'var(--red)'}">${Fulfil.esc(host)}: ${r.ok ? 'подключение в порядке' : Fulfil.esc(r.error || 'ошибка')}</span>`)
+          .join('');
+      } catch (err) {
+        area.innerHTML = `<span style="color:var(--red)">${Fulfil.esc(Fulfil.errorText(err))}</span>`;
+      }
+    }
+
+    async function archiveClient(id) {
+      if (!confirm('Архивировать клиента? Это можно отменить в любой момент.')) return;
+      try {
+        await Fulfil.api('DELETE', `/clients/${id}`);
+        Fulfil.toast('Клиент архивирован');
+        load();
+      } catch (err) {
+        Fulfil.toast(Fulfil.errorText(err), 'error');
+      }
+    }
+
+    async function openEditModal(id) {
+      let current = null;
+      if (id) {
+        try {
+          const all = await Fulfil.api('GET', '/clients?include_archived=true');
+          current = all.find((c) => c.id === id) || null;
+        } catch (err) {
+          Fulfil.toast(Fulfil.errorText(err), 'error');
+          return;
+        }
+      }
+
+      const values = await Fulfil.formModal({
+        title: id ? 'Изменить клиента' : 'Новый клиент',
+        submitLabel: 'Сохранить',
+        fields: [
+          { id: 'name', label: 'Наименование', type: 'text', value: current ? current.name : '', required: true },
+          {
+            id: 'apiKey', label: 'Ключ API WB', type: 'password', value: '',
+            hint: id
+              ? 'Оставьте пустым, чтобы не менять. Ключу нужны категории «Контент» и «Маркетплейс».'
+              : 'Ключу нужны категории «Контент» и «Маркетплейс» — можно оставить пустым и ввести позже.',
+          },
+          { id: 'wbWarehouseId', label: 'ID склада WB', type: 'text', value: current ? (current.wbWarehouseId || '') : '' },
+          { id: 'wbWarehouseName', label: 'Название склада WB', type: 'text', value: current ? (current.wbWarehouseName || '') : '' },
+        ],
+      });
+      if (!values) return;
+
+      const payload = {
+        name: values.name,
+        wbWarehouseId: values.wbWarehouseId || null,
+        wbWarehouseName: values.wbWarehouseName || null,
+      };
+      if (values.apiKey) payload.apiKey = values.apiKey;
+
+      try {
+        if (id) await Fulfil.api('PATCH', `/clients/${id}`, payload);
+        else await Fulfil.api('POST', '/clients', payload);
+        Fulfil.toast(id ? 'Клиент изменён' : 'Клиент создан');
+        load();
+      } catch (err) {
+        Fulfil.toast(Fulfil.errorText(err), 'error');
+      }
+    }
+
+    document.getElementById('btnNew').addEventListener('click', () => openEditModal(null));
+    document.getElementById('showArchived').addEventListener('change', (e) => {
+      showArchived = e.target.checked;
+      load();
+    });
+
+    load();
+  </script>
+</body>
+</html>

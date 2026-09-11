@@ -18,11 +18,20 @@ class Settings(BaseSettings):
     jwt_expire_minutes: int = 60
 
     wb_mode: Literal["http", "mock"] = "mock"
+    # Устарело — с Этапа 1 у каждого клиента свой ключ (clients.wb_api_key_enc) и свой
+    # склад (clients.wb_warehouse_id). Эти два поля читает только миграция стадии 1,
+    # чтобы завести клиента "Основной кабинет" из уже настроенного .env.
     wb_api_token: str = ""
+    wb_warehouse_id: str = ""
     wb_api_base: str = "https://marketplace-api.wildberries.ru"
     # Карточки товаров живут на отдельном хосте content-api, не на marketplace-api.
     wb_content_api_base: str = "https://content-api.wildberries.ru"
-    wb_warehouse_id: str = ""
+
+    # Ключ шифрования API-ключей клиентов (Fernet, urlsafe-base64, 32 байта).
+    # Пусто — сохранение ключа клиента невозможно, см. fulfil.secrets.
+    client_secrets_key: str = ""
+    # Имя клиента, которое миграция стадии 1 даёт "старому" однокабинетному клиенту.
+    default_client_name: str = "Основной кабинет"
 
 
 @lru_cache

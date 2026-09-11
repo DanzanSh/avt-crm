@@ -2,7 +2,10 @@
 
 Регресс: `characteristics` приходит СПИСКОМ объектов {id,name,value}, а не словарём —
 старый маппинг падал с AttributeError: 'list' object has no attribute 'get'.
-"""
+
+Этап 1: WBHttpClient(token, client_id=...) — токен приходит от вызывающей стороны,
+не из settings. get_product_cards разворачивает sizes[] каждой карточки в отдельные
+записи (chrtId, techSize, skus[0] как barcode); размер без skus пропускается."""
 
 import httpx
 import pytest
@@ -31,35 +34,46 @@ _WB_PAYLOAD = {
                 {"id": 1, "name": "Состав", "value": ["хлопок"]},
                 {"id": 2, "name": "Цвет", "value": ["чёрный", "синий"]},
             ],
-            "sizes": [{"techSize": "48", "wbSize": "M", "skus": ["2000000012345"]}],
+            "sizes": [
+                {"chrtID": 111, "techSize": "48", "wbSize": "M", "skus": ["2000000012345"]},
+                {"chrtID": 112, "techSize": "50", "wbSize": "L", "skus": ["2000000012346"]},
+            ],
             "photos": [{"big": "https://cdn.wb.ru/big.jpg", "square": "https://cdn.wb.ru/sq.jpg"}],
         },
-        # вырожденная карточка: photos=None, sizes отсутствуют, characteristics пуст
+        # вырожденная карточка: photos=None, sizes отсутствуют, characteristics пуст —
+        # без sizes карточка не даёт ни одного товара (нечем идентифицировать размер).
         {"nmID": 100501, "title": "Носки", "characteristics": [], "photos": None},
+        # размер без skus (баркод ещё не привязан в личном кабинете WB) — пропускается.
+        {"nmID": 100502, "title": "Шапка", "sizes": [{"chrtID": 113, "techSize": "one size", "skus": []}]},
     ],
-    "cursor": {"updatedAt": "2026-02-01T00:00:00Z", "nmID": 100501, "total": 2},
+    "cursor": {"updatedAt": "2026-02-01T00:00:00Z", "nmID": 100501, "total": 3},
 }
 
 
-def test_get_product_cards_parses_live_shape(monkeypatch):
-    client = WBHttpClient()
+def test_get_product_cards_expands_sizes_into_separate_entries(monkeypatch):
+    client = WBHttpClient("test-token")
     monkeypatch.setattr(client, "_request", lambda *a, **kw: _Resp(_WB_PAYLOAD))
 
     page = client.get_product_cards()
 
+    # Карточка с двумя размерами -> два товара, вырожденные карточки — ноль.
+    assert len(page["cards"]) == 2
+
     first = page["cards"][0]
     assert first["nmId"] == 100500
+    assert first["chrtId"] == 111
     assert first["barcode"] == "2000000012345"
     assert first["size"] == "48"
     assert first["color"] == "чёрный,синий"
     assert first["imageUrl"] == "https://cdn.wb.ru/big.jpg"
 
     second = page["cards"][1]
-    assert second["barcode"] == ""
-    assert second["color"] == ""
-    assert second["imageUrl"] == ""
+    assert second["chrtId"] == 112
+    assert second["barcode"] == "2000000012346"
+    assert second["size"] == "50"
 
-    assert page["cursor"] == {"updatedAt": "2026-02-01T00:00:00Z", "nmID": 100501, "total": 2}
+    # cursor.total — число КАРТОЧЕК у WB (3), не число получившихся товаров (2).
+    assert page["cursor"] == {"updatedAt": "2026-02-01T00:00:00Z", "nmID": 100501, "total": 3}
 
 
 class _FakeHttpxClient:
@@ -86,8 +100,7 @@ def test_request_converts_wb_4xx_to_wb_api_error(monkeypatch):
     monkeypatch.setattr(httpx, "Client", lambda *a, **kw: _FakeHttpxClient(resp))
     monkeypatch.setattr(WBHttpClient, "_log", staticmethod(lambda *a, **kw: None))
 
-    client = WBHttpClient()
-    client._token = "test-token"  # не зависим от .env
+    client = WBHttpClient("test-token", client_name="ООО Ромашка")
     with pytest.raises(WbApiError) as ei:
         client.get_product_cards()
 
@@ -96,6 +109,7 @@ def test_request_converts_wb_4xx_to_wb_api_error(monkeypatch):
     assert err.reason_code == "wb_api_error"
     assert err.extra["upstreamStatus"] == 401
     assert "401" in err.detail and "invalid token" in err.detail
+    assert "Ромашка" in err.what_to_do  # подсказка называет клиента по имени
 
 
 def test_request_converts_network_error_to_wb_api_error(monkeypatch):
@@ -106,25 +120,23 @@ def test_request_converts_network_error_to_wb_api_error(monkeypatch):
     monkeypatch.setattr(WBHttpClient, "_log", staticmethod(lambda *a, **kw: None))
     monkeypatch.setattr("fulfil.integrations.wb.http.time.sleep", lambda *_: None)
 
-    client = WBHttpClient()
-    client._token = "test-token"  # не зависим от .env
+    client = WBHttpClient("test-token")
     with pytest.raises(WbApiError) as ei:
         client.get_product_cards()
     assert ei.value.extra["upstreamStatus"] is None
 
 
 def test_request_without_token_fails_fast(monkeypatch):
-    client = WBHttpClient()
-    client._token = ""
+    client = WBHttpClient("")
     monkeypatch.setattr(httpx, "Client", lambda *a, **kw: pytest.fail("не должно дойти до сети"))
     with pytest.raises(WbApiError) as ei:
         client.get_product_cards()
     assert ei.value.extra["upstreamStatus"] is None
-    assert "WB_API_TOKEN" in ei.value.detail
+    assert "не задан ключ API" in ei.value.detail
 
 
 def test_get_product_cards_sends_content_base_and_incremental_cursor(monkeypatch):
-    client = WBHttpClient()
+    client = WBHttpClient("test-token")
     seen: dict = {}
 
     def _fake_request(method, path, *, base=None, json=None, **kw):
@@ -139,3 +151,19 @@ def test_get_product_cards_sends_content_base_and_incremental_cursor(monkeypatch
     cur = seen["json"]["settings"]["cursor"]
     assert cur["updatedAt"] == "2026-01-01T00:00:00Z" and cur["nmID"] == 42
     assert seen["json"]["settings"]["sort"] == {"ascending": True}
+
+
+def test_ping_checks_both_hosts(monkeypatch):
+    client = WBHttpClient("test-token")
+    seen_bases = []
+
+    def _fake_request(method, path, *, base=None, **kw):
+        seen_bases.append(base)
+        return _Resp({})
+
+    monkeypatch.setattr(client, "_request", _fake_request)
+    result = client.ping()
+
+    assert result["marketplace"]["ok"] is True
+    assert result["content"]["ok"] is True
+    assert set(seen_bases) == {client._base, client._content_base}

@@ -170,9 +170,25 @@
                 <textarea class="input" id="fm_${f.id}" ${reqAttr}>${esc(value)}</textarea>
               </div>`;
           }
+          if (f.type === 'select') {
+            const optionsHtml = (f.options || [])
+              .map(
+                (o) =>
+                  `<option value="${esc(o.value)}" ${String(o.value) === String(value) ? 'selected' : ''}>${esc(o.label)}</option>`
+              )
+              .join('');
+            return `
+              <div>
+                <label class="field-label" for="fm_${f.id}">${esc(f.label)}</label>
+                ${hintHtml}
+                <select class="input" id="fm_${f.id}" ${reqAttr}>${optionsHtml}</select>
+              </div>`;
+          }
           const typeAttrs =
             f.type === 'number'
               ? `type="number"${f.min !== undefined ? ` min="${esc(f.min)}"` : ''}`
+              : f.type === 'password'
+              ? 'type="password"'
               : 'type="text"';
           return `
             <div>
@@ -274,8 +290,63 @@
     });
   }
 
+  /** Общий фильтр «Клиент» (Этап 1, п.1.5) — рендерит <select> «Все клиенты / <клиенты>»
+   * в переданный контейнер, грузит GET /clients, хранит выбор в localStorage (в try/catch —
+   * приватный режим браузера может его не давать) и вызывает onChange(clientId|null) при
+   * смене (null = «Все клиенты»). Один экземпляр на страницу — Fulfil.clientFilter. */
+  const clientFilter = {
+    _clientId: null,
+    _clients: [],
+    async mount(container, onChange) {
+      let saved = null;
+      try {
+        saved = localStorage.getItem('fulfil.clientFilter');
+      } catch (e) {
+        /* приватный режим / отключено хранилище — просто без сохранения выбора */
+      }
+
+      const select = document.createElement('select');
+      select.className = 'input client-filter-select';
+      select.style.cssText = 'width:auto; flex:none;';
+      select.innerHTML = '<option value="">Все клиенты</option>';
+
+      try {
+        this._clients = await api('GET', '/clients');
+        const options = this._clients.map((c) => `<option value="${c.id}">${esc(c.name)}</option>`).join('');
+        select.innerHTML = '<option value="">Все клиенты</option>' + options;
+        if (saved && this._clients.some((c) => String(c.id) === saved)) {
+          select.value = saved;
+          this._clientId = Number(saved);
+        }
+      } catch (e) {
+        /* список клиентов не загрузился — фильтр остаётся в состоянии «Все клиенты» */
+      }
+
+      select.addEventListener('change', () => {
+        this._clientId = select.value ? Number(select.value) : null;
+        try {
+          if (this._clientId) localStorage.setItem('fulfil.clientFilter', String(this._clientId));
+          else localStorage.removeItem('fulfil.clientFilter');
+        } catch (e) {
+          /* см. выше */
+        }
+        if (onChange) onChange(this._clientId);
+      });
+
+      container.appendChild(select);
+      return select;
+    },
+    get clientId() {
+      return this._clientId;
+    },
+    clientName(id) {
+      const c = this._clients.find((x) => x.id === id);
+      return c ? c.name : '';
+    },
+  };
+
   window.Fulfil = {
     api, getToken, setToken, logout, decodeJwt, esc, toast, errorText, requireAuth, newIdempotencyKey, thumb,
-    plural, formModal,
+    plural, formModal, clientFilter,
   };
 })();
