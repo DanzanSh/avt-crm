@@ -134,7 +134,148 @@
     }
   }
 
+  /** Русское склонение по числу: plural(2, 'место', 'места', 'мест') -> 'места'.
+   * Было размножено по страницам (fbs/orders.html и т.п.) — вынесено сюда (п.0.2). */
+  function plural(n, one, few, many) {
+    const d10 = n % 10;
+    const d100 = n % 100;
+    if (d10 === 1 && d100 !== 11) return one;
+    if (d10 >= 2 && d10 <= 4 && (d100 < 12 || d100 > 14)) return few;
+    return many;
+  }
+
+  /** Общая модалка формы взамен prompt() (п.1.2 жалоб заказчика: голые prompt()
+   * без подписей и текущих значений). Динамически создаёт .modal-overlay/.modal
+   * поверх existующих классов из theme.css, возвращает Promise со значениями
+   * полей или null при отмене/Esc.
+   *
+   * fields: [{ id, label, type: 'number'|'text'|'textarea', value, min, hint, required }]
+   * onChange(values, api) — необязательный колбэк для живого предпросмотра
+   * (debounce 300мс), где api = { setPreview(html), setSubmitEnabled(bool) }. */
+  function formModal({ title, fields, submitLabel, onChange }) {
+    return new Promise((resolve) => {
+      const overlay = document.createElement('div');
+      overlay.className = 'modal-overlay open';
+
+      const fieldsHtml = fields
+        .map((f) => {
+          const value = f.value === undefined || f.value === null ? '' : f.value;
+          const hintHtml = f.hint ? `<div class="field-hint">${esc(f.hint)}</div>` : '';
+          const reqAttr = f.required ? 'required' : '';
+          if (f.type === 'textarea') {
+            return `
+              <div>
+                <label class="field-label" for="fm_${f.id}">${esc(f.label)}</label>
+                ${hintHtml}
+                <textarea class="input" id="fm_${f.id}" ${reqAttr}>${esc(value)}</textarea>
+              </div>`;
+          }
+          const typeAttrs =
+            f.type === 'number'
+              ? `type="number"${f.min !== undefined ? ` min="${esc(f.min)}"` : ''}`
+              : 'type="text"';
+          return `
+            <div>
+              <label class="field-label" for="fm_${f.id}">${esc(f.label)}</label>
+              ${hintHtml}
+              <input class="input" id="fm_${f.id}" ${typeAttrs} value="${esc(value)}" ${reqAttr} />
+            </div>`;
+        })
+        .join('');
+
+      const form = document.createElement('form');
+      form.className = 'modal';
+      form.innerHTML = `
+        <h2>${esc(title)}</h2>
+        ${fieldsHtml}
+        <div class="form-modal-preview"></div>
+        <div class="field-row" style="margin-top:8px;">
+          <button type="button" class="btn" data-action="cancel">Отмена</button>
+          <button type="submit" class="btn btn-primary" data-action="submit">${esc(submitLabel || 'Сохранить')}</button>
+        </div>`;
+      overlay.appendChild(form);
+      document.body.appendChild(overlay);
+
+      const submitBtn = form.querySelector('[data-action="submit"]');
+      const previewEl = form.querySelector('.form-modal-preview');
+      if (typeof onChange === 'function') submitBtn.disabled = true; // до первого предпросмотра
+
+      function fieldEl(id) {
+        return form.querySelector('#fm_' + id);
+      }
+
+      function readValues() {
+        const values = {};
+        fields.forEach((f) => {
+          const el = fieldEl(f.id);
+          if (f.type === 'number') {
+            values[f.id] = el.value === '' ? null : Number(el.value);
+          } else {
+            values[f.id] = el.value;
+          }
+        });
+        return values;
+      }
+
+      function isValid() {
+        for (const f of fields) {
+          const el = fieldEl(f.id);
+          if (f.required && !el.value) return false;
+          if (f.type === 'number' && el.value !== '') {
+            const n = Number(el.value);
+            if (Number.isNaN(n)) return false;
+            if (f.min !== undefined && n < f.min) return false;
+          }
+        }
+        return true;
+      }
+
+      function cleanup(result) {
+        document.removeEventListener('keydown', onKeydown);
+        overlay.remove();
+        resolve(result);
+      }
+
+      function onKeydown(e) {
+        if (e.key === 'Escape') cleanup(null);
+      }
+      document.addEventListener('keydown', onKeydown);
+
+      form.querySelector('[data-action="cancel"]').addEventListener('click', () => cleanup(null));
+      overlay.addEventListener('click', (e) => {
+        if (e.target === overlay) cleanup(null);
+      });
+
+      form.addEventListener('submit', (e) => {
+        e.preventDefault();
+        if (!isValid() || submitBtn.disabled) return;
+        cleanup(readValues());
+      });
+
+      if (typeof onChange === 'function') {
+        const api = {
+          setPreview: (html) => {
+            previewEl.innerHTML = html;
+          },
+          setSubmitEnabled: (enabled) => {
+            submitBtn.disabled = !enabled;
+          },
+        };
+        let timer = null;
+        const trigger = () => onChange(readValues(), api);
+        fields.forEach((f) => {
+          fieldEl(f.id).addEventListener('input', () => {
+            clearTimeout(timer);
+            timer = setTimeout(trigger, 300);
+          });
+        });
+        trigger(); // первый расчёт сразу с предзаполненными значениями
+      }
+    });
+  }
+
   window.Fulfil = {
     api, getToken, setToken, logout, decodeJwt, esc, toast, errorText, requireAuth, newIdempotencyKey, thumb,
+    plural, formModal,
   };
 })();

@@ -330,6 +330,10 @@ tbody tr:hover { background: var(--row-hover); }
   gap: 10px;
 }
 .modal h2 { margin: 0 0 4px; font-size: 19px; font-weight: 700; }
+/* Подпись поля в модалке — раньше жила только в products.html, а теперь нужна
+   и общему Fulfil.formModal() (core.js), который заменяет prompt() на других
+   страницах (см. storage-map.html). Вынесено сюда, чтобы не размножать. */
+.field-label { font-size: 14px; color: var(--muted); display: flex; justify-content: space-between; margin-bottom: 4px; }
 
 /* ── Служебное ──────────────────────────────────────────────────── */
 

@@ -131,6 +131,44 @@ def test_render_cell_labels_encodes_address(db, monkeypatch):
     assert captured == [cell.address] == ["A-1-1-1"]
 
 
+def _pdf_page_count(pdf_bytes: bytes) -> int:
+    """Без внешних зависимостей (pypdf и т.п. в проекте нет) считаем страницы по
+    маркерам объектов reportlab: /Type /Page встречается один раз на страницу, а
+    /Type /Pages (дерево страниц) — с суффиксом 's', его исключаем негативным лукахедом."""
+    import re
+
+    return len(re.findall(rb"/Type\s*/Page(?!s)", pdf_bytes))
+
+
+@pytest.mark.parametrize("size", ["58x40", "120x75"])
+def test_render_cell_labels_fits_long_address(db, size):
+    """0.1: длинный адрес (двухбуквенная зона, двузначные номера) не должен ронять
+    рендер ни на одном из двух форматов этикетки, и PDF должен содержать по одной
+    странице на каждую переданную ячейку."""
+    import fulfil.labels.cell_labels as cell_labels
+
+    cells = generate_cells(db, "B1", racks=12, cells_per_rack=10, shelves_per_rack=4)
+    long_address_cells = [c for c in cells if c.address == "B1-12-4-10"]
+    assert long_address_cells, "ожидали найти ячейку с адресом B1-12-4-10 среди сгенерированных"
+
+    pdf_bytes = cell_labels.render_cell_labels_pdf(cells[:5], size=size)
+
+    assert pdf_bytes.startswith(b"%PDF")
+    assert _pdf_page_count(pdf_bytes) == 5
+
+
+def test_fit_font_size_shrinks_for_long_address():
+    """Автоподгонка через stringWidth: обычный короткий адрес влезает базовым
+    кеглем, а длинный — уменьшенным, но не ниже минимума."""
+    import fulfil.labels.cell_labels as cell_labels
+
+    narrow_width = 60.0  # заведомо узко для 58×40 при базовом кегле 18pt
+    normal = cell_labels._fit_font_size("A-1-1-1", narrow_width, cell_labels._ADDRESS_BASE_FONT)
+    long_addr = cell_labels._fit_font_size("B1-12-4-10", narrow_width, cell_labels._ADDRESS_BASE_FONT)
+    assert long_addr <= normal
+    assert long_addr >= cell_labels._ADDRESS_MIN_FONT
+
+
 def test_resolve_location_by_barcode_or_address(db):
     [cell] = generate_cells(db, "A", racks=1, cells_per_rack=1)
 

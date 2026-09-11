@@ -34,16 +34,6 @@
       rejected_no_stock: ['Нет остатка', 'badge-red'],
     };
 
-    // «1 позиция / 2 позиции / 5 позиций» — в таблице был заголовок «Позиций»,
-    // в карточке число стоит рядом со словом и склонение видно.
-    function plural(n, one, few, many) {
-      const d10 = n % 10;
-      const d100 = n % 100;
-      if (d10 === 1 && d100 !== 11) return one;
-      if (d10 >= 2 && d10 <= 4 && (d100 < 12 || d100 > 14)) return few;
-      return many;
-    }
-
     async function load() {
       const body = document.getElementById('body');
       try {
@@ -64,7 +54,7 @@
           <div class="list-card">
             <div class="order-id">${Fulfil.esc(o.wbOrderId)}</div>
             <span class="badge ${cls}">${label}</span>
-            <div class="list-card__meta">${o.items.length} ${plural(o.items.length, 'позиция', 'позиции', 'позиций')}</div>
+            <div class="list-card__meta">${o.items.length} ${Fulfil.plural(o.items.length, 'позиция', 'позиции', 'позиций')}</div>
             ${actions ? `<div class="card-actions">${actions}</div>` : ''}
           </div>`;
           })
