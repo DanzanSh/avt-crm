@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from fulfil.auth import get_current_user
 from fulfil.db import get_db
-from fulfil.errors import NotFoundError
+from fulfil.errors import AppError, NotFoundError
 from fulfil.integrations.wb import get_wb_client
 from fulfil.models.product import Product
 from fulfil.schemas.stock import (
@@ -15,6 +15,7 @@ from fulfil.schemas.stock import (
     TransferFbsRequest,
     WriteOffStockRequest,
 )
+from fulfil.services import clients as clients_service
 from fulfil.services import idempotency
 from fulfil.services import stock as stock_service
 from fulfil.services.storage import resolve_location
@@ -28,6 +29,8 @@ def _actor(user: dict) -> str:
 
 @router.get("")
 def list_stock(client_id: int | None = None, db: Session = Depends(get_db)) -> list[dict]:
+    """Три запроса на весь список, а не get_stock_summary()+get_stock_by_cell() в
+    цикле по каждому товару (Этап 2, п.2.3: список «Остатки» был N+1)."""
     stmt = (
         select(Product)
         .options(selectinload(Product.client))
@@ -37,10 +40,14 @@ def list_stock(client_id: int | None = None, db: Session = Depends(get_db)) -> l
     if client_id is not None:
         stmt = stmt.where(Product.client_id == client_id)
     products = db.scalars(stmt).all()
+
+    summaries = stock_service.list_stock_summaries(db, client_id=client_id)
+    by_cell = stock_service.list_stock_by_cell(db, client_id=client_id)
+
     result = []
     for p in products:
-        summary = stock_service.get_stock_summary(db, p)
-        if summary["total"] == 0:
+        summary = summaries.get(p.id)
+        if summary is None or summary["total"] == 0:
             continue
         result.append(
             {
@@ -49,7 +56,7 @@ def list_stock(client_id: int | None = None, db: Session = Depends(get_db)) -> l
                 "barcode": p.barcode,
                 "clientId": p.client_id,
                 "clientName": p.client_name,
-                "byCell": stock_service.get_stock_by_cell(db, p),
+                "byCell": by_cell.get(p.id, []),
             }
         )
     return result
@@ -86,7 +93,47 @@ def transfer_fbs(product_id: int, body: TransferFbsRequest, db: Session = Depend
         "id": transfer.id,
         "status": transfer.status.value,
         "qty": transfer.qty,
+        # Раньше при FAILED текст причины оседал только в fbs_transfers.wb_response —
+        # на экране был просто «WB не принял передачу» без объяснения (Этап 2, п.2.3).
+        "error": transfer.wb_response if transfer.status.value == "failed" else None,
     }
+
+
+@router.post("/transfer-fbs-all")
+def transfer_all_available_fbs(
+    client_id: int, db: Session = Depends(get_db)
+) -> list[dict]:
+    """«Передать всё свободное по клиенту» (Этап 2, п.2.3) — по одной передаче на
+    товар с ненулевым availableToTransfer. Ошибка одного товара (WbApiError) не
+    останавливает остальные — так же, как /products/sync-from-wb по клиентам."""
+    client = clients_service.get_live_client_or_404(db, client_id)
+    wb_client = get_wb_client(client)
+    summaries = stock_service.list_stock_summaries(db, client_id=client_id)
+
+    results = []
+    for product_id, summary in summaries.items():
+        available = summary["availableToTransfer"]
+        if available <= 0:
+            continue
+        product = _get_product(db, product_id)
+        idempotency_key = f"transfer-all-{product_id}-{int(dt.datetime.now().timestamp())}"
+        try:
+            transfer = stock_service.transfer_to_fbs(db, product, available, idempotency_key, wb_client)
+            results.append(
+                {
+                    "productId": product_id,
+                    "productName": product.name,
+                    "qty": available,
+                    "status": transfer.status.value,
+                    "error": transfer.wb_response if transfer.status.value == "failed" else None,
+                }
+            )
+        except AppError as exc:
+            db.rollback()
+            results.append(
+                {"productId": product_id, "productName": product.name, "qty": available, "status": "failed", "error": exc.detail}
+            )
+    return results
 
 
 def _product_agg(db: Session, product: Product) -> dict:

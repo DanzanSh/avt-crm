@@ -36,6 +36,11 @@ class Product(Base):
     size: Mapped[str | None] = mapped_column(String(64))
     color: Mapped[str | None] = mapped_column(String(64))
     image_url: Mapped[str | None] = mapped_column(String(1024))
+    # Кэш текущего остатка на складе WB FBS (Этап 2 плана №3, п.2.3) — обновляется
+    # при каждой успешной передаче (services.stock.transfer_to_fbs) и, позже,
+    # фоновым опросом (Этап 3). Источник правды для «доступно к передаче»
+    # вместо ломкого Σ уже отправленных транзакций.
+    wb_fbs_amount: Mapped[int] = mapped_column(default=0, server_default="0")
     synced_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()

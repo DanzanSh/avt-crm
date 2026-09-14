@@ -29,6 +29,14 @@
     .field-row { display: flex; gap: 8px; align-items: center; }
     .check-result { font-size: 16px; margin-top: 8px; display: flex; flex-direction: column; gap: 4px; }
     .archived-row { opacity: .55; }
+    /* Модалка «Склад WB» (Этап 2 плана №3, п.2.2) — сложнее полей Fulfil.formModal
+       (переключение существующий/новый, подгрузка списков с сервера), поэтому
+       собрана вручную, как #opModal в stock.html. */
+    .wh-current { font-size: 15px; color: var(--text-2); background: var(--bg2); border-radius: var(--radius-sm); padding: 10px; }
+    .wh-blocked { font-size: 15px; color: var(--muted); }
+    .radio-group { display: flex; flex-direction: column; gap: 6px; font-size: 15px; color: var(--text-2); margin: 4px 0 8px; }
+    .radio-group label { display: flex; align-items: center; gap: 8px; font-weight: 400; cursor: pointer; }
+    .wh-section[hidden] { display: none; }
   </style>
 </head>
 <body>
@@ -43,6 +51,14 @@
   </div>
 
   <div id="body">Загрузка…</div>
+
+  <!-- Склад WB для отгрузок клиента (Этап 2 плана №3, п.2.2): либо выбрать
+       существующий склад из WB, либо создать новый прямо здесь. Свободный ввод
+       ID/названия убран — раньше опечатка в нём обнаруживалась только на первой
+       реальной передаче остатка. -->
+  <div class="modal-overlay" id="warehouseModal">
+    <div class="modal" id="warehouseModalBody"></div>
+  </div>
 
   <script src="/js/sidebar.js"></script>
   <script>
@@ -76,9 +92,15 @@
         body.innerHTML = clients
           .map((c) => {
             const meta = [];
-            const metaItem = (label, value) =>
-              meta.push(`<span class="meta-item"><span class="meta-label">${Fulfil.esc(label)}:</span> <span class="meta-value">${Fulfil.esc(value)}</span></span>`);
-            metaItem('Склад WB', c.wbWarehouseName || c.wbWarehouseId || '—');
+            const metaItem = (label, value, cls) =>
+              meta.push(`<span class="meta-item"><span class="meta-label">${Fulfil.esc(label)}:</span> <span class="meta-value${cls ? ' ' + cls : ''}">${Fulfil.esc(value)}</span></span>`);
+            // Явная причина, а не тихое тире (Этап 2, п.2.2) — без склада передача
+            // остатков и синхронизация заказов для этого клиента не работают.
+            metaItem(
+              'Склад WB',
+              c.wbWarehouseName || c.wbWarehouseId || 'не выбран — передача остатков отключена',
+              c.wbWarehouseId ? '' : 'key-warn'
+            );
             metaItem('SKU', String(c.skuCount));
             metaItem('Штук на складе', String(c.stockQty));
             metaItem('Активных заказов', String(c.activeOrders));
@@ -87,6 +109,7 @@
             const actions = c.archivedAt
               ? `<button class="btn btn-restore" data-id="${c.id}">Восстановить</button>`
               : `<button class="btn btn-edit" data-id="${c.id}">Изменить</button>
+                 <button class="btn" data-warehouse="${c.id}">Склад WB</button>
                  <button class="btn" data-check="${c.id}">Проверить подключение</button>
                  <button class="btn btn-danger" data-archive="${c.id}">Архивировать</button>`;
 
@@ -109,6 +132,9 @@
         );
         document.querySelectorAll('.btn-edit').forEach((btn) =>
           btn.addEventListener('click', () => openEditModal(Number(btn.dataset.id)))
+        );
+        document.querySelectorAll('[data-warehouse]').forEach((btn) =>
+          btn.addEventListener('click', () => openWarehouseModal(clients.find((c) => c.id === Number(btn.dataset.warehouse))))
         );
         document.querySelectorAll('[data-archive]').forEach((btn) =>
           btn.addEventListener('click', () => archiveClient(btn.dataset.archive))
@@ -176,17 +202,14 @@
               ? 'Оставьте пустым, чтобы не менять. Ключу нужны категории «Контент» и «Маркетплейс».'
               : 'Ключу нужны категории «Контент» и «Маркетплейс» — можно оставить пустым и ввести позже.',
           },
-          { id: 'wbWarehouseId', label: 'ID склада WB', type: 'text', value: current ? (current.wbWarehouseId || '') : '' },
-          { id: 'wbWarehouseName', label: 'Название склада WB', type: 'text', value: current ? (current.wbWarehouseName || '') : '' },
         ],
       });
       if (!values) return;
 
-      const payload = {
-        name: values.name,
-        wbWarehouseId: values.wbWarehouseId || null,
-        wbWarehouseName: values.wbWarehouseName || null,
-      };
+      // Склад WB задаётся отдельно, кнопкой «Склад WB» на карточке (Этап 2,
+      // п.2.2) — выбором из списка или созданием через API, а не свободным
+      // текстом здесь.
+      const payload = { name: values.name };
       if (values.apiKey) payload.apiKey = values.apiKey;
 
       try {
@@ -197,6 +220,139 @@
       } catch (err) {
         Fulfil.toast(Fulfil.errorText(err), 'error');
       }
+    }
+
+    function closeWarehouseModal() {
+      document.getElementById('warehouseModal').classList.remove('open');
+    }
+
+    async function openWarehouseModal(client) {
+      const overlay = document.getElementById('warehouseModal');
+      const body = document.getElementById('warehouseModalBody');
+      const current = client.wbWarehouseName
+        ? `${client.wbWarehouseName} (${client.wbWarehouseId})`
+        : client.wbWarehouseId || null;
+
+      if (!client.hasApiKey) {
+        // Без ключа WB не отдаст ни списка складов, ни списка пунктов приёма —
+        // показывать пустые селекты только запутает (Этап 2, п.2.2).
+        body.innerHTML = `
+          <h2>Склад WB — ${Fulfil.esc(client.name)}</h2>
+          <div class="wh-current">${current ? 'Сейчас: ' + Fulfil.esc(current) : 'Склад не выбран.'}</div>
+          <div class="wh-blocked">Сначала укажите ключ API WB в разделе «Изменить» — без него WB не отдаёт ни список складов, ни список пунктов приёма.</div>
+          <div class="field-row"><button type="button" class="btn" id="whCancel">Закрыть</button></div>`;
+        overlay.classList.add('open');
+        document.getElementById('whCancel').addEventListener('click', closeWarehouseModal);
+        return;
+      }
+
+      body.innerHTML = `
+        <h2>Склад WB — ${Fulfil.esc(client.name)}</h2>
+        <div class="wh-current">${current ? 'Сейчас: ' + Fulfil.esc(current) : 'Склад не выбран — передача остатков и синхронизация заказов отключены.'}</div>
+        <div class="radio-group" id="whModeGroup">
+          <label><input type="radio" name="whMode" value="existing" checked /> Выбрать существующий склад</label>
+          <label><input type="radio" name="whMode" value="new" /> Создать новый склад в WB</label>
+        </div>
+        <div class="wh-section" id="whExistingSection">
+          <select class="input" id="whExistingSelect"><option value="">Загрузка…</option></select>
+          <div class="field-row" style="margin-top:8px;">
+            <button type="button" class="btn" id="whCancel">Отмена</button>
+            <button type="button" class="btn btn-primary" id="whSelectSubmit" disabled>Выбрать</button>
+          </div>
+        </div>
+        <div class="wh-section" id="whNewSection" hidden>
+          <label class="field-label" for="whNewName">Название склада</label>
+          <input class="input" id="whNewName" value="Фулфилмент ${Fulfil.esc(client.name)}" />
+          <label class="field-label" for="whOfficeSelect" style="margin-top:8px;">Пункт приёма</label>
+          <select class="input" id="whOfficeSelect"><option value="">Загрузка…</option></select>
+          <div class="field-row" style="margin-top:8px;">
+            <button type="button" class="btn" id="whCancelNew">Отмена</button>
+            <button type="button" class="btn btn-primary" id="whCreateSubmit" disabled>Создать склад в WB</button>
+          </div>
+        </div>`;
+      overlay.classList.add('open');
+
+      const existingSection = document.getElementById('whExistingSection');
+      const newSection = document.getElementById('whNewSection');
+      document.querySelectorAll('input[name="whMode"]').forEach((radio) =>
+        radio.addEventListener('change', () => {
+          const isNew = radio.value === 'new' && radio.checked;
+          if (radio.checked) {
+            existingSection.hidden = isNew;
+            newSection.hidden = !isNew;
+          }
+        })
+      );
+      document.getElementById('whCancel').addEventListener('click', closeWarehouseModal);
+      document.getElementById('whCancelNew').addEventListener('click', closeWarehouseModal);
+
+      // Оба списка грузятся параллельно — на «Создать» тоже переключаются сразу,
+      // без повторного ожидания при смене режима.
+      Fulfil.api('GET', `/clients/${client.id}/wb-warehouses`)
+        .then((warehouses) => {
+          const select = document.getElementById('whExistingSelect');
+          if (!warehouses.length) {
+            select.innerHTML = '<option value="">У этого кабинета WB нет ни одного склада</option>';
+            return;
+          }
+          select.innerHTML = warehouses
+            .map((w) => `<option value="${Fulfil.esc(w.id)}" data-name="${Fulfil.esc(w.name)}">${Fulfil.esc(w.name)} (${Fulfil.esc(w.id)})</option>`)
+            .join('');
+          document.getElementById('whSelectSubmit').disabled = false;
+        })
+        .catch((err) => {
+          document.getElementById('whExistingSelect').innerHTML = `<option value="">${Fulfil.esc(Fulfil.errorText(err))}</option>`;
+        });
+
+      Fulfil.api('GET', `/clients/${client.id}/wb-offices`)
+        .then((offices) => {
+          const select = document.getElementById('whOfficeSelect');
+          if (!offices.length) {
+            select.innerHTML = '<option value="">У кабинета WB нет пунктов приёма</option>';
+            return;
+          }
+          select.innerHTML = offices
+            .map((o) => `<option value="${o.id}">${Fulfil.esc(o.name)}${o.address ? ' — ' + Fulfil.esc(o.address) : ''}</option>`)
+            .join('');
+          document.getElementById('whCreateSubmit').disabled = false;
+        })
+        .catch((err) => {
+          document.getElementById('whOfficeSelect').innerHTML = `<option value="">${Fulfil.esc(Fulfil.errorText(err))}</option>`;
+        });
+
+      document.getElementById('whSelectSubmit').addEventListener('click', async () => {
+        const select = document.getElementById('whExistingSelect');
+        const option = select.options[select.selectedIndex];
+        if (!option || !option.value) return;
+        try {
+          await Fulfil.api('POST', `/clients/${client.id}/wb-warehouses/select`, {
+            warehouseId: option.value,
+            warehouseName: option.dataset.name || option.value,
+          });
+          Fulfil.toast('Склад привязан');
+          closeWarehouseModal();
+          load();
+        } catch (err) {
+          Fulfil.toast(Fulfil.errorText(err), 'error');
+        }
+      });
+
+      document.getElementById('whCreateSubmit').addEventListener('click', async () => {
+        const name = document.getElementById('whNewName').value.trim();
+        const officeId = document.getElementById('whOfficeSelect').value;
+        if (!name || !officeId) {
+          Fulfil.toast('Укажите название склада и пункт приёма', 'error');
+          return;
+        }
+        try {
+          await Fulfil.api('POST', `/clients/${client.id}/wb-warehouses`, { name, officeId: Number(officeId) });
+          Fulfil.toast('Склад создан и привязан');
+          closeWarehouseModal();
+          load();
+        } catch (err) {
+          Fulfil.toast(Fulfil.errorText(err), 'error');
+        }
+      });
     }
 
     document.getElementById('btnNew').addEventListener('click', () => openEditModal(null));

@@ -42,7 +42,12 @@
   </style>
 </head>
 <body>
-  <div class="page-head"><h1 class="page-title">Остатки на складе</h1></div>
+  <div class="page-head">
+    <h1 class="page-title">Остатки на складе</h1>
+    <div class="toolbar">
+      <button class="btn btn-primary" id="btnTransferAll" hidden>Передать всё свободное на ФБС</button>
+    </div>
+  </div>
 
   <div id="clientFilterMount" style="margin-bottom:14px;"></div>
 
@@ -70,14 +75,15 @@
             <th></th>
             <th>Товар</th>
             <th>Баркод</th>
-            <th class="num">Всего</th>
-            <th class="num">На ФБС</th>
-            <th class="num">Доступно</th>
+            <th class="num">На полках</th>
+            <th class="num">В заказах</th>
+            <th class="num">На WB</th>
+            <th class="num">Можно передать</th>
             <th></th>
           </tr>
         </thead>
         <tbody id="stockBody">
-          <tr><td colspan="7">Загрузка…</td></tr>
+          <tr><td colspan="8">Загрузка…</td></tr>
         </tbody>
       </table>
     </div>
@@ -154,8 +160,12 @@
         document.getElementById('statTotal').textContent = sht(sum('total'));
         document.getElementById('stockSummary').hidden = !rows.length;
 
+        // «Передать всё свободное» осмысленно только для конкретного клиента —
+        // у каждого свой склад WB, общей кнопки на все кабинеты сразу нет.
+        document.getElementById('btnTransferAll').hidden = !Fulfil.clientFilter.clientId;
+
         if (!rows.length) {
-          body.innerHTML = '<tr><td colspan="7" class="empty-state">Остатков пока нет</td></tr>';
+          body.innerHTML = '<tr><td colspan="8" class="empty-state">Остатков пока нет</td></tr>';
           return;
         }
         body.innerHTML = rows
@@ -166,13 +176,14 @@
             <td>${Fulfil.esc(r.productName)} <span class="badge badge-muted">${Fulfil.esc(r.clientName || '')}</span></td>
             <td style="font-family:var(--mono)">${Fulfil.esc(r.barcode)}</td>
             <td class="num">${r.total}</td>
-            <td class="num">${r.transferredFbs}</td>
-            <td class="num">${r.availableToTransfer}${r.fbsOversold ? `<div class="oversold">на ФБС на ${r.fbsOversold} больше остатка</div>` : ''}</td>
+            <td class="num">${r.inOrders}</td>
+            <td class="num">${r.wbFbsAmount}${r.fbsOversold ? `<div class="oversold">на WB на ${r.fbsOversold} больше остатка</div>` : ''}</td>
+            <td class="num">${r.availableToTransfer}</td>
             <td><button class="btn btn-primary btn-transfer" data-id="${r.productId}" data-available="${r.availableToTransfer}">На ФБС</button></td>
           </tr>
           <tr class="detail-row" data-product-id="${r.productId}" style="display:none">
             <td></td>
-            <td colspan="6">${renderByCell(r)}</td>
+            <td colspan="7">${renderByCell(r)}</td>
           </tr>`
           )
           .join('');
@@ -193,7 +204,7 @@
         });
         bindByCellActions();
       } catch (err) {
-        body.innerHTML = `<tr><td colspan="7" class="empty-state">${Fulfil.esc(Fulfil.errorText(err))}</td></tr>`;
+        body.innerHTML = `<tr><td colspan="8" class="empty-state">${Fulfil.esc(Fulfil.errorText(err))}</td></tr>`;
       }
     }
 
@@ -351,7 +362,34 @@
       try {
         const idempotencyKey = `ui-${productId}-${Date.now()}`;
         const res = await Fulfil.api('POST', `/stock/${productId}/transfer-fbs`, { qty, idempotencyKey });
-        Fulfil.toast(res.status === 'sent' ? `Передано ${res.qty} шт на ФБС` : 'WB не принял передачу', res.status === 'sent' ? 'success' : 'error');
+        // res.error — текст причины от WB при status:'failed' (Этап 2, п.2.3):
+        // раньше здесь была только безликая «WB не принял передачу».
+        Fulfil.toast(
+          res.status === 'sent' ? `Передано ${res.qty} шт на ФБС` : res.error || 'WB не принял передачу',
+          res.status === 'sent' ? 'success' : 'error'
+        );
+        loadStock();
+      } catch (err) {
+        Fulfil.toast(Fulfil.errorText(err), 'error');
+      }
+    }
+
+    async function transferAllAvailable() {
+      const clientId = Fulfil.clientFilter.clientId;
+      if (!clientId) return;
+      if (!confirm('Передать на ФБС весь свободный остаток по выбранному клиенту?')) return;
+      try {
+        const results = await Fulfil.api('POST', `/stock/transfer-fbs-all?client_id=${clientId}`);
+        if (!results.length) {
+          Fulfil.toast('Передавать нечего — свободного остатка нет');
+        } else {
+          const sent = results.filter((r) => r.status === 'sent').length;
+          const failed = results.length - sent;
+          Fulfil.toast(
+            failed ? `Передано ${sent} из ${results.length}, ${failed} с ошибкой` : `Передано ${sent} товаров на ФБС`,
+            failed ? 'warning' : 'success'
+          );
+        }
         loadStock();
       } catch (err) {
         Fulfil.toast(Fulfil.errorText(err), 'error');
@@ -394,6 +432,7 @@
     }
 
     document.getElementById('btnHistFilter').addEventListener('click', loadHistory);
+    document.getElementById('btnTransferAll').addEventListener('click', transferAllAvailable);
 
     Fulfil.clientFilter.mount(document.getElementById('clientFilterMount'), loadStock).then(loadStock);
   </script>

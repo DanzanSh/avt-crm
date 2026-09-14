@@ -7,12 +7,45 @@ import datetime as dt
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from fulfil.errors import AppError, CellOccupiedError, StockChangedError
+from fulfil.errors import AppError, CellOccupiedError, StockChangedError, WbApiError
 from fulfil.integrations.wb.base import WBClient
+from fulfil.models.fbs import Order, OrderItem, OrderStatus
 from fulfil.models.product import Product
 from fulfil.models.stock import FbsTransfer, FbsTransferStatus, MoveReason, StockByCell, StockMove, new_move_group_id
 from fulfil.models.storage import Cell
 from fulfil.services.stock_ledger import apply_move
+
+# Заказы, чья позиция ещё не списана с полки (Этап 2 плана №3, п.2.3). PACKED и
+# позже уже прошли commit_pick_lines() (services/picking.py) — остаток по ним
+# списан из stock_by_cell, поэтому считать их здесь ещё раз значило бы вычесть
+# одно и то же количество дважды.
+_UNASSEMBLED_ORDER_STATUSES = (OrderStatus.NEW, OrderStatus.CONFIRMED, OrderStatus.IN_ASSEMBLY)
+
+
+def _in_orders_qty(db: Session, product_id: int) -> int:
+    return db.scalar(
+        select(func.coalesce(func.sum(OrderItem.qty), 0))
+        .select_from(OrderItem)
+        .join(Order, Order.id == OrderItem.order_id)
+        .where(OrderItem.product_id == product_id, Order.status.in_(_UNASSEMBLED_ORDER_STATUSES))
+    ) or 0
+
+
+def _summary_from_parts(product_id: int, total: int, in_orders: int, wb_amount: int) -> dict:
+    # Новая формула (Этап 2, п.2.3) вместо total − Σ уже отправленного: та сумма не
+    # уменьшается при сборке заказа, поэтому как только заказ собран, появлялся
+    # ложный fbsOversold. Здесь и «в заказах», и «на WB» вычитаются из того, что
+    # физически лежит на полках, — оба уменьшают именно доступное к передаче.
+    return {
+        "productId": product_id,
+        "total": total,
+        "inOrders": in_orders,
+        "wbFbsAmount": wb_amount,
+        "availableToTransfer": max(total - in_orders - wb_amount, 0),
+        # WB считает остаток больше, чем у нас физически есть (например, списали
+        # товар на полке, а на WB значение ещё не обновили) — видно тут явно.
+        "fbsOversold": max(wb_amount - (total - in_orders), 0),
+    }
 
 
 def get_stock_summary(db: Session, product: Product) -> dict:
@@ -20,20 +53,43 @@ def get_stock_summary(db: Session, product: Product) -> dict:
         select(func.coalesce(func.sum(StockByCell.qty), 0)).where(
             StockByCell.product_id == product.id
         )
+    ) or 0
+    in_orders = _in_orders_qty(db, product.id)
+    return _summary_from_parts(product.id, total, in_orders, product.wb_fbs_amount or 0)
+
+
+def list_stock_summaries(db: Session, *, client_id: int | None = None) -> dict[int, dict]:
+    """Тот же агрегат, что get_stock_summary(), но для ВСЕХ товаров сразу — три
+    GROUP BY запроса вместо одного на каждый товар (Этап 2, п.2.3: список «Остатки»
+    раньше делал get_stock_summary()+get_stock_by_cell() в цикле по каждой строке).
+    Возвращает {productId: summary} — товары без остатка и без заказов в словаре
+    просто не появятся, вызывающая сторона решает, показывать ли нулевую строку."""
+    totals_stmt = select(StockByCell.product_id, func.sum(StockByCell.qty)).group_by(StockByCell.product_id)
+    orders_stmt = (
+        select(OrderItem.product_id, func.sum(OrderItem.qty))
+        .select_from(OrderItem)
+        .join(Order, Order.id == OrderItem.order_id)
+        .where(Order.status.in_(_UNASSEMBLED_ORDER_STATUSES))
+        .group_by(OrderItem.product_id)
     )
-    transferred = db.scalar(
-        select(func.coalesce(func.sum(FbsTransfer.qty), 0))
-        .where(FbsTransfer.product_id == product.id)
-        .where(FbsTransfer.status == FbsTransferStatus.SENT)
-    )
+    wb_stmt = select(Product.id, Product.wb_fbs_amount)
+    if client_id is not None:
+        totals_stmt = totals_stmt.join(Product, Product.id == StockByCell.product_id).where(
+            Product.client_id == client_id
+        )
+        orders_stmt = orders_stmt.join(Product, Product.id == OrderItem.product_id).where(
+            Product.client_id == client_id
+        )
+        wb_stmt = wb_stmt.where(Product.client_id == client_id)
+
+    totals = dict(db.execute(totals_stmt).all())
+    in_orders = dict(db.execute(orders_stmt).all())
+    wb_amounts = dict(db.execute(wb_stmt).all())
+
+    product_ids = set(totals) | set(in_orders) | {pid for pid, amt in wb_amounts.items() if amt}
     return {
-        "productId": product.id,
-        "total": total,
-        "transferredFbs": transferred,
-        "availableToTransfer": max(total - transferred, 0),
-        # Уменьшение остатка ниже уже переданного в ФБС количества не уведомляет WB
-        # автоматически (см. FEATURES-PLAN.md, этап 2.5) — это видно тут явно.
-        "fbsOversold": max(transferred - total, 0),
+        pid: _summary_from_parts(pid, totals.get(pid, 0), in_orders.get(pid, 0), wb_amounts.get(pid, 0) or 0)
+        for pid in product_ids
     }
 
 
@@ -48,6 +104,26 @@ def get_stock_by_cell(db: Session, product: Product) -> list[dict]:
         {"cellId": c.id, "cellAddress": c.address, "cellBarcode": c.barcode, "qty": s.qty}
         for s, c in rows
     ]
+
+
+def list_stock_by_cell(db: Session, *, client_id: int | None = None) -> dict[int, list[dict]]:
+    """Разбивка по ячейкам для ВСЕХ товаров сразу — один запрос вместо
+    get_stock_by_cell() в цикле по каждой строке (Этап 2, п.2.3)."""
+    stmt = (
+        select(StockByCell, Cell)
+        .join(Cell, Cell.id == StockByCell.cell_id)
+        .where(StockByCell.qty > 0)
+        .order_by(Cell.zone_code, Cell.rack_no, Cell.shelf_no, Cell.cell_no)
+    )
+    if client_id is not None:
+        stmt = stmt.join(Product, Product.id == StockByCell.product_id).where(Product.client_id == client_id)
+
+    by_product: dict[int, list[dict]] = {}
+    for s, c in db.execute(stmt).all():
+        by_product.setdefault(s.product_id, []).append(
+            {"cellId": c.id, "cellAddress": c.address, "cellBarcode": c.barcode, "qty": s.qty}
+        )
+    return by_product
 
 
 def transfer_to_fbs(
@@ -88,12 +164,28 @@ def transfer_to_fbs(
     db.refresh(transfer)
 
     try:
-        resp = wb_client.update_fbs_stock(warehouse_id, product.barcode, qty)
-        transfer.status = FbsTransferStatus.SENT if resp.get("ok") else FbsTransferStatus.FAILED
+        # WB ЗАДАЁТ остаток на складе (не прибавляет к нему) — читаем, что там
+        # сейчас, и отправляем текущее + qty. Раньше здесь отправлялся голый qty,
+        # и вторая передача «+3» поверх уже переданных «5» стирала остаток на WB
+        # тройкой вместо восьмёрки (Этап 2, п.2.3).
+        before = wb_client.get_fbs_stocks(warehouse_id, [product.barcode]).get(product.barcode, 0)
+        after = before + qty
+        resp = wb_client.set_fbs_stocks(warehouse_id, {product.barcode: after})
+        transfer.wb_amount_before = before
+        transfer.wb_amount_after = after
         transfer.wb_response = str(resp)
-    except Exception as exc:  # лимиты/сеть WB — не считаем поставку неудачной молча
+        if resp.get("ok"):
+            transfer.status = FbsTransferStatus.SENT
+            product.wb_fbs_amount = after
+        else:
+            transfer.status = FbsTransferStatus.FAILED
+    except WbApiError as exc:
+        # Узкий except: WbApiError — это WB сказал «нет» (лимиты/сеть/токен), и это
+        # ожидаемый исход, который стоит записать как FAILED с текстом причины.
+        # Баг в самом коде (не WbApiError) должен падать наружу, а не тихо
+        # прятаться под тем же статусом (было `except Exception` — см. Этап 2, п.2.3).
         transfer.status = FbsTransferStatus.FAILED
-        transfer.wb_response = str(exc)
+        transfer.wb_response = exc.detail
 
     db.commit()
     db.refresh(transfer)

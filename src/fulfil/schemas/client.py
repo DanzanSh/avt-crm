@@ -35,3 +35,16 @@ class ClientUpdateRequest(CamelModel):
     api_key: str | None = None
     wb_warehouse_id: str | None = None
     wb_warehouse_name: str | None = None
+
+
+class SetWbWarehouseRequest(CamelModel):
+    """Выбор УЖЕ существующего в WB склада — id и name берутся из строки
+    GET /clients/{id}/wb-warehouses, а не вводятся руками (Этап 2, п.2.2)."""
+
+    warehouse_id: str
+    warehouse_name: str
+
+
+class CreateWbWarehouseRequest(CamelModel):
+    name: str
+    office_id: int

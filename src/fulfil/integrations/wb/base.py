@@ -40,6 +40,20 @@ class WbOrder(TypedDict):
     items: list[dict]  # [{barcode, qty}]
 
 
+class WbOffice(TypedDict):
+    """Пункт приёма WB — нужен только при создании нового склада (Этап 2, п.2.2):
+    WB требует привязать склад к office_id."""
+
+    id: int
+    name: str
+    address: str
+
+
+class WbWarehouse(TypedDict):
+    id: str
+    name: str
+
+
 class WbSticker(TypedDict):
     type: str  # 'png' | 'svg'
     data: str  # base64
@@ -53,7 +67,26 @@ class WBClient(Protocol):
 
     def get_product_cards(self, cursor: WbCursor | None = None) -> WbCardsPage: ...
 
-    def update_fbs_stock(self, warehouse_id: str, barcode: str, qty: int) -> dict: ...
+    # --- Склад WB клиента (Этап 2, п.2.2/2.3) ---
+    def list_offices(self) -> list[WbOffice]:
+        """Пункты приёма продавца — нужны только для создания нового склада."""
+        ...
+
+    def list_warehouses(self) -> list[WbWarehouse]:
+        """Склады FBS, уже существующие у продавца в WB."""
+        ...
+
+    def create_warehouse(self, name: str, office_id: int) -> WbWarehouse: ...
+
+    def get_fbs_stocks(self, warehouse_id: str, barcodes: list[str]) -> dict[str, int]:
+        """Текущий остаток на складе WB по каждому баркоду (0, если WB его не знает).
+        Читается ПЕРЕД set_fbs_stocks — WB задаёт остаток, а не прибавляет к нему."""
+        ...
+
+    def set_fbs_stocks(self, warehouse_id: str, amounts: dict[str, int]) -> dict:
+        """Пакетно задаёт остаток по каждому баркоду (WB ЗАДАЁТ значение целиком —
+        вызывающая сторона обязана сама прибавить qty к уже известному остатку)."""
+        ...
 
     def get_new_orders(self) -> list[WbOrder]: ...
 

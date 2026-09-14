@@ -5,7 +5,13 @@ from fulfil.auth import get_current_user
 from fulfil.db import get_db
 from fulfil.integrations.wb import get_wb_client
 from fulfil.models.client import Client
-from fulfil.schemas.client import ClientCreateRequest, ClientOut, ClientUpdateRequest
+from fulfil.schemas.client import (
+    ClientCreateRequest,
+    ClientOut,
+    ClientUpdateRequest,
+    CreateWbWarehouseRequest,
+    SetWbWarehouseRequest,
+)
 from fulfil.services import clients as clients_service
 
 router = APIRouter(prefix="/clients", tags=["clients"], dependencies=[Depends(get_current_user)])
@@ -90,3 +96,46 @@ def check_connection(client_id: int, db: Session = Depends(get_db)) -> dict:
     client = clients_service.get_client_or_404(db, client_id)
     wb_client = get_wb_client(client)
     return clients_service.check_connection(wb_client)
+
+
+# --- Склад WB клиента (Этап 2, п.2.2) ---------------------------------------
+
+
+@router.get("/{client_id}/wb-offices")
+def wb_offices(client_id: int, db: Session = Depends(get_db)) -> list[dict]:
+    """Пункты приёма продавца — нужны только для создания НОВОГО склада."""
+    client = clients_service.get_live_client_or_404(db, client_id)
+    wb_client = get_wb_client(client)
+    return clients_service.list_wb_offices(wb_client)
+
+
+@router.get("/{client_id}/wb-warehouses")
+def wb_warehouses(client_id: int, db: Session = Depends(get_db)) -> list[dict]:
+    """Склады FBS, уже существующие у продавца в WB — для варианта «выбрать
+    существующий» (Этап 2, п.2.2)."""
+    client = clients_service.get_live_client_or_404(db, client_id)
+    wb_client = get_wb_client(client)
+    return clients_service.list_wb_warehouses(wb_client)
+
+
+@router.post("/{client_id}/wb-warehouses/select", response_model=ClientOut)
+def select_wb_warehouse(
+    client_id: int, body: SetWbWarehouseRequest, db: Session = Depends(get_db), user: dict = Depends(get_current_user)
+) -> ClientOut:
+    client = clients_service.get_live_client_or_404(db, client_id)
+    client = clients_service.set_wb_warehouse(
+        db, client, warehouse_id=body.warehouse_id, warehouse_name=body.warehouse_name, actor=_actor(user),
+    )
+    return _client_out(client)
+
+
+@router.post("/{client_id}/wb-warehouses", response_model=ClientOut)
+def create_wb_warehouse(
+    client_id: int, body: CreateWbWarehouseRequest, db: Session = Depends(get_db), user: dict = Depends(get_current_user)
+) -> ClientOut:
+    client = clients_service.get_live_client_or_404(db, client_id)
+    wb_client = get_wb_client(client)
+    client = clients_service.create_wb_warehouse(
+        db, client, wb_client, name=body.name, office_id=body.office_id, actor=_actor(user),
+    )
+    return _client_out(client)

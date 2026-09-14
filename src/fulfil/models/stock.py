@@ -74,6 +74,12 @@ class FbsTransfer(Base):
     status: Mapped[FbsTransferStatus] = mapped_column(default=FbsTransferStatus.PENDING)
     idempotency_key: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     wb_response: Mapped[str | None] = mapped_column(String(2048))
+    # Аудит правильной передачи (Этап 2 плана №3, п.2.3): PUT /api/v3/stocks
+    # у WB ЗАДАЁТ остаток, а не увеличивает его, поэтому transfer_to_fbs читает
+    # текущее значение на WB ПЕРЕД отправкой — эти два поля фиксируют, что
+    # именно было прочитано и что в итоге отправлено.
+    wb_amount_before: Mapped[int | None] = mapped_column(default=None)
+    wb_amount_after: Mapped[int | None] = mapped_column(default=None)
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

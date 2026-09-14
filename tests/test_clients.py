@@ -192,3 +192,40 @@ def test_transfer_to_fbs_without_warehouse_gives_409(db, seller):
     with pytest.raises(AppError) as exc_info:
         transfer_to_fbs(db, product, 5, idempotency_key="k1", wb_client=WBMockClient())
     assert exc_info.value.reason_code == "no_wb_warehouse"
+
+
+# --- Склад WB клиента (Этап 2 плана №3, п.2.2) -------------------------------
+# «Оба варианта — выбрать существующий из списка или создать через API».
+
+
+def test_create_wb_warehouse_creates_in_wb_and_binds_to_client(db, seller):
+    wb = WBMockClient(client_id=seller.id)
+    assert wb.list_warehouses() == []
+
+    updated = clients_service.create_wb_warehouse(
+        db, seller, wb, name="Фулфилмент Ромашка", office_id=1, actor="tester",
+    )
+
+    assert updated.wb_warehouse_id is not None
+    assert updated.wb_warehouse_name == "Фулфилмент Ромашка"
+    # Реально создан в WB (а не только записан в клиенте) — виден в списке складов.
+    assert [w["id"] for w in wb.list_warehouses()] == [updated.wb_warehouse_id]
+
+
+def test_set_wb_warehouse_binds_existing_without_calling_wb(db, seller):
+    updated = clients_service.set_wb_warehouse(
+        db, seller, warehouse_id="WH-EXISTING-1", warehouse_name="Склад продавца", actor="tester",
+    )
+    assert updated.wb_warehouse_id == "WH-EXISTING-1"
+    assert updated.wb_warehouse_name == "Склад продавца"
+
+
+def test_list_wb_offices_and_warehouses_delegate_to_wb_client(db, seller):
+    wb = WBMockClient(client_id=seller.id)
+    offices = clients_service.list_wb_offices(wb)
+    assert offices and all("id" in o and "name" in o for o in offices)
+
+    clients_service.create_wb_warehouse(db, seller, wb, name="Мой склад", office_id=offices[0]["id"], actor="t")
+    warehouses = clients_service.list_wb_warehouses(wb)
+    assert len(warehouses) == 1
+    assert warehouses[0]["name"] == "Мой склад"

@@ -66,6 +66,14 @@
       border: 1px solid var(--border);
       border-radius: var(--radius-sm);
     }
+    /* Пагинация каталога — размеры/цвета подтянуты к .archived-toggle и .btn,
+       чтобы панель не выделялась среди остальных элементов страницы. */
+    .pagination-bar { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; margin-top: 16px; }
+    .pagination-bar[hidden] { display: none; }
+    .page-size-group { display: flex; align-items: center; gap: 8px; font-size: 16px; color: var(--text-2); white-space: nowrap; }
+    .page-size-group select.input { width: auto; }
+    .pagination-controls { display: flex; align-items: center; gap: 10px; }
+    .pagination-controls .page-info { font-size: 16px; color: var(--text-2); white-space: nowrap; }
   </style>
 </head>
 <body>
@@ -103,6 +111,23 @@
 
   <div id="body">Загрузка…</div>
 
+  <div class="pagination-bar" id="paginationBar" hidden>
+    <label class="page-size-group">
+      Показывать по:
+      <select class="input" id="pageSize">
+        <option value="10">10</option>
+        <option value="20" selected>20</option>
+        <option value="50">50</option>
+        <option value="100">100</option>
+      </select>
+    </label>
+    <div class="pagination-controls">
+      <button class="btn" id="btnPrevPage">← Назад</button>
+      <span class="page-info" id="pageInfo"></span>
+      <button class="btn" id="btnNextPage">Вперёд →</button>
+    </div>
+  </div>
+
   <div class="modal-overlay" id="editModal">
     <div class="modal" id="editModalBody"></div>
   </div>
@@ -129,6 +154,13 @@
   <script>
     let currentSearch = '';
     let showArchived = false;
+
+    // Пагинация — как и фильтры, целиком на клиенте: сервер сейчас отдаёт
+    // весь отфильтрованный список за раз, разбивка на страницы только рисует
+    // нужный кусок allItems. Смена фильтра/поиска/страницы сбрасывает currentPage.
+    let allItems = [];
+    let currentPage = 1;
+    let pageSize = 20;
 
     // 3.1 — фильтры каталога. Порядок массива = порядок списков в интерфейсе;
     // поле совпадает с именем query-параметра и ключом в /products/filter-options.
@@ -187,105 +219,145 @@
         FILTERS.forEach((f) => {
           if (filters[f.field]) q.set(f.field, filters[f.field]);
         });
-        const items = await Fulfil.api('GET', '/products?' + q.toString());
-        if (!items.length) {
-          // С активным фильтром «Товаров пока нет» вводит в заблуждение: каталог
-          // не пуст, просто под условия ничего не подошло.
-          const narrowed = currentSearch || FILTERS.some((f) => filters[f.field]);
-          body.innerHTML = narrowed
-            ? '<div class="empty-state">Под выбранные условия ничего не подошло</div>'
-            : '<div class="empty-state">Товаров пока нет</div>';
-          return;
-        }
-        body.innerHTML = items
-          .map((p) => {
-            const manual = new Set(p.manualFields || []);
-            const mark = (field) => (manual.has(field) ? '<span class="manual-mark" title="Изменено вручную">✎</span>' : '');
-
-            // Колонки таблицы сложены в одну мета-строку карточки (макет /goods).
-            // 0.4: раньше значения шли голым списком через « · » без подписи поля —
-            // заказчик не понимал, что есть что. Теперь пары «название: значение»;
-            // поле показывается, если есть значение или пометка ручной правки.
-            const meta = [];
-            const metaField = (label, value, ...marks) => {
-              const m = marks.map(mark).join('');
-              const v = Fulfil.esc(value || '');
-              if (!v && !m) return;
-              meta.push(
-                `<span class="meta-item"><span class="meta-label">${Fulfil.esc(label)}:</span> <span class="meta-value">${v || '—'}</span>${m}</span>`
-              );
-            };
-            // ШК — особый случай, сохраняем прежнее поведение «ШК не задан» для
-            // пустого/временного (TEMP-) баркода вместо тире.
-            meta.push(
-              p.barcode && !p.barcode.startsWith('TEMP')
-                ? `<span class="meta-item"><span class="meta-label">ШК:</span> <span class="meta-value mono">${Fulfil.esc(p.barcode)}</span>${mark('barcode')}</span>`
-                : `<span class="meta-item"><span class="meta-label">ШК:</span> <i>не задан</i>${mark('barcode')}</span>`
-            );
-            metaField('Клиент', p.clientName);
-            metaField('Артикул', p.vendorCode, 'vendor_code');
-            metaField('Бренд', p.brand, 'brand');
-            metaField('Размер', p.size, 'size');
-            metaField('Цвет', p.color, 'color');
-            metaField('nmID WB', p.wbNmId);
-
-            const actions = p.archivedAt
-              ? `<button class="btn btn-restore" data-id="${p.id}">Восстановить</button>`
-              : `<button class="btn btn-edit" data-id="${p.id}">Изменить</button>
-                 <button class="btn btn-danger btn-delete" data-id="${p.id}">Удалить</button>
-                 ${p.wbNmId ? '' : `<button class="btn btn-gen" data-id="${p.id}">Внутренний ШК</button>`}`;
-
-            // Миниатюра: /images/tm/ вместо /images/big/. onerror откатывает на
-            // исходный imageUrl (data-full) и снимает сам себя, чтобы не зациклиться.
-            const thumbHtml = p.imageUrl
-              ? `<img class="product-thumb" src="${Fulfil.esc(Fulfil.thumb(p.imageUrl))}" alt=""
-                      loading="lazy" data-full="${Fulfil.esc(p.imageUrl)}"
-                      onerror="this.onerror=null;this.src=this.dataset.full;" />`
-              : `<div class="product-thumb product-thumb--empty" aria-hidden="true">—</div>`;
-
-            return `
-          <div class="list-card list-card--with-thumb ${p.archivedAt ? 'archived-row' : ''}" data-id="${p.id}">
-            ${thumbHtml}
-            <div class="product-content">
-              <div class="product-name">${Fulfil.esc(p.name)}${mark('name')}${p.archivedAt ? ' <span class="badge badge-muted">архив</span>' : ''}</div>
-              <div class="list-card__meta product-meta">${meta.join('')}</div>
-              <div class="card-actions">${actions}</div>
-            </div>
-          </div>`;
-          })
-          .join('');
-
-        document.querySelectorAll('.btn-gen').forEach((btn) =>
-          btn.addEventListener('click', async () => {
-            try {
-              await Fulfil.api('POST', `/products/${btn.dataset.id}/generate-internal-barcode`);
-              load();
-            } catch (err) {
-              Fulfil.toast(Fulfil.errorText(err), 'error');
-            }
-          })
-        );
-        document.querySelectorAll('.btn-edit').forEach((btn) =>
-          btn.addEventListener('click', () => openEditModal(btn.dataset.id))
-        );
-        document.querySelectorAll('.btn-delete').forEach((btn) =>
-          btn.addEventListener('click', () => deleteProduct(btn.dataset.id))
-        );
-        document.querySelectorAll('.btn-restore').forEach((btn) =>
-          btn.addEventListener('click', async () => {
-            try {
-              await Fulfil.api('POST', `/products/${btn.dataset.id}/restore`);
-              Fulfil.toast('Товар восстановлен');
-              reloadAll();
-            } catch (err) {
-              Fulfil.toast(Fulfil.errorText(err), 'error');
-            }
-          })
-        );
+        allItems = await Fulfil.api('GET', '/products?' + q.toString());
+        currentPage = 1;
+        renderPage();
       } catch (err) {
+        document.getElementById('paginationBar').hidden = true;
         body.innerHTML = `<div class="empty-state">${Fulfil.esc(Fulfil.errorText(err))}</div>`;
       }
     }
+
+    function renderPage() {
+      const body = document.getElementById('body');
+      const paginationBar = document.getElementById('paginationBar');
+      if (!allItems.length) {
+        paginationBar.hidden = true;
+        // С активным фильтром «Товаров пока нет» вводит в заблуждение: каталог
+        // не пуст, просто под условия ничего не подошло.
+        const narrowed = currentSearch || FILTERS.some((f) => filters[f.field]);
+        body.innerHTML = narrowed
+          ? '<div class="empty-state">Под выбранные условия ничего не подошло</div>'
+          : '<div class="empty-state">Товаров пока нет</div>';
+        return;
+      }
+
+      const totalPages = Math.max(1, Math.ceil(allItems.length / pageSize));
+      if (currentPage > totalPages) currentPage = totalPages;
+      const start = (currentPage - 1) * pageSize;
+      const items = allItems.slice(start, start + pageSize);
+
+      body.innerHTML = items
+        .map((p) => {
+          const manual = new Set(p.manualFields || []);
+          const mark = (field) => (manual.has(field) ? '<span class="manual-mark" title="Изменено вручную">✎</span>' : '');
+
+          // Колонки таблицы сложены в одну мета-строку карточки (макет /goods).
+          // 0.4: раньше значения шли голым списком через « · » без подписи поля —
+          // заказчик не понимал, что есть что. Теперь пары «название: значение»;
+          // поле показывается, если есть значение или пометка ручной правки.
+          const meta = [];
+          const metaField = (label, value, ...marks) => {
+            const m = marks.map(mark).join('');
+            const v = Fulfil.esc(value || '');
+            if (!v && !m) return;
+            meta.push(
+              `<span class="meta-item"><span class="meta-label">${Fulfil.esc(label)}:</span> <span class="meta-value">${v || '—'}</span>${m}</span>`
+            );
+          };
+          // ШК — особый случай, сохраняем прежнее поведение «ШК не задан» для
+          // пустого/временного (TEMP-) баркода вместо тире.
+          meta.push(
+            p.barcode && !p.barcode.startsWith('TEMP')
+              ? `<span class="meta-item"><span class="meta-label">ШК:</span> <span class="meta-value mono">${Fulfil.esc(p.barcode)}</span>${mark('barcode')}</span>`
+              : `<span class="meta-item"><span class="meta-label">ШК:</span> <i>не задан</i>${mark('barcode')}</span>`
+          );
+          metaField('Клиент', p.clientName);
+          metaField('Артикул', p.vendorCode, 'vendor_code');
+          metaField('Бренд', p.brand, 'brand');
+          metaField('Размер', p.size, 'size');
+          metaField('Цвет', p.color, 'color');
+          metaField('nmID WB', p.wbNmId);
+
+          const actions = p.archivedAt
+            ? `<button class="btn btn-restore" data-id="${p.id}">Восстановить</button>`
+            : `<button class="btn btn-edit" data-id="${p.id}">Изменить</button>
+               <button class="btn btn-danger btn-delete" data-id="${p.id}">Удалить</button>
+               ${p.wbNmId ? '' : `<button class="btn btn-gen" data-id="${p.id}">Внутренний ШК</button>`}`;
+
+          // Миниатюра: /images/tm/ вместо /images/big/. onerror откатывает на
+          // исходный imageUrl (data-full) и снимает сам себя, чтобы не зациклиться.
+          const thumbHtml = p.imageUrl
+            ? `<img class="product-thumb" src="${Fulfil.esc(Fulfil.thumb(p.imageUrl))}" alt=""
+                    loading="lazy" data-full="${Fulfil.esc(p.imageUrl)}"
+                    onerror="this.onerror=null;this.src=this.dataset.full;" />`
+            : `<div class="product-thumb product-thumb--empty" aria-hidden="true">—</div>`;
+
+          return `
+        <div class="list-card list-card--with-thumb ${p.archivedAt ? 'archived-row' : ''}" data-id="${p.id}">
+          ${thumbHtml}
+          <div class="product-content">
+            <div class="product-name">${Fulfil.esc(p.name)}${mark('name')}${p.archivedAt ? ' <span class="badge badge-muted">архив</span>' : ''}</div>
+            <div class="list-card__meta product-meta">${meta.join('')}</div>
+            <div class="card-actions">${actions}</div>
+          </div>
+        </div>`;
+        })
+        .join('');
+
+      document.querySelectorAll('.btn-gen').forEach((btn) =>
+        btn.addEventListener('click', async () => {
+          try {
+            await Fulfil.api('POST', `/products/${btn.dataset.id}/generate-internal-barcode`);
+            load();
+          } catch (err) {
+            Fulfil.toast(Fulfil.errorText(err), 'error');
+          }
+        })
+      );
+      document.querySelectorAll('.btn-edit').forEach((btn) =>
+        btn.addEventListener('click', () => openEditModal(btn.dataset.id))
+      );
+      document.querySelectorAll('.btn-delete').forEach((btn) =>
+        btn.addEventListener('click', () => deleteProduct(btn.dataset.id))
+      );
+      document.querySelectorAll('.btn-restore').forEach((btn) =>
+        btn.addEventListener('click', async () => {
+          try {
+            await Fulfil.api('POST', `/products/${btn.dataset.id}/restore`);
+            Fulfil.toast('Товар восстановлен');
+            reloadAll();
+          } catch (err) {
+            Fulfil.toast(Fulfil.errorText(err), 'error');
+          }
+        })
+      );
+
+      paginationBar.hidden = false;
+      document.getElementById('pageInfo').textContent =
+        `${start + 1}–${Math.min(start + pageSize, allItems.length)} из ${allItems.length} (стр. ${currentPage} из ${totalPages})`;
+      document.getElementById('btnPrevPage').disabled = currentPage <= 1;
+      document.getElementById('btnNextPage').disabled = currentPage >= totalPages;
+    }
+
+    document.getElementById('pageSize').addEventListener('change', (e) => {
+      pageSize = Number(e.target.value);
+      currentPage = 1;
+      renderPage();
+    });
+    document.getElementById('btnPrevPage').addEventListener('click', () => {
+      if (currentPage > 1) {
+        currentPage--;
+        renderPage();
+      }
+    });
+    document.getElementById('btnNextPage').addEventListener('click', () => {
+      const totalPages = Math.max(1, Math.ceil(allItems.length / pageSize));
+      if (currentPage < totalPages) {
+        currentPage++;
+        renderPage();
+      }
+    });
 
     async function deleteProduct(id) {
       if (!confirm('Удалить товар?')) return;

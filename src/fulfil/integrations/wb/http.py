@@ -15,7 +15,7 @@ import httpx
 from fulfil.config import get_settings
 from fulfil.db import SessionLocal
 from fulfil.errors import WbApiError
-from fulfil.integrations.wb.base import WbCardsPage, WbCursor, WbOrder, WbSticker
+from fulfil.integrations.wb.base import WbCardsPage, WbCursor, WbOffice, WbOrder, WbSticker, WbWarehouse
 from fulfil.models.wb_log import WbApiLog
 
 _MAX_RETRIES = 3
@@ -234,9 +234,39 @@ class WBHttpClient:
         }
         return {"cards": cards, "cursor": next_cursor}
 
+    # --- Склад WB клиента (Этап 2, п.2.2) ---
+    # best-effort: пути и формы ответов не обкатаны против боевого токена, см.
+    # предупреждение в шапке файла и docs/wb-api-contract.md.
+    def list_offices(self) -> list[WbOffice]:
+        resp = self._request("GET", "/api/v3/offices")
+        return [
+            {"id": o.get("id"), "name": o.get("name", ""), "address": o.get("address", "")}
+            for o in resp.json() or []
+        ]
+
+    def list_warehouses(self) -> list[WbWarehouse]:
+        resp = self._request("GET", "/api/v3/warehouses")
+        return [{"id": str(w.get("id")), "name": w.get("name", "")} for w in resp.json() or []]
+
+    def create_warehouse(self, name: str, office_id: int) -> WbWarehouse:
+        resp = self._request(
+            "POST", "/api/v3/warehouses", json={"name": name, "officeId": office_id}
+        )
+        data = resp.json()
+        return {"id": str(data.get("id")), "name": name}
+
     # --- Остатки FBS ---
-    def update_fbs_stock(self, warehouse_id: str, barcode: str, qty: int) -> dict:
-        body = {"stocks": [{"sku": barcode, "amount": qty}]}
+    def get_fbs_stocks(self, warehouse_id: str, barcodes: list[str]) -> dict[str, int]:
+        if not barcodes:
+            return {}
+        resp = self._request(
+            "POST", f"/api/v3/stocks/{warehouse_id}", json={"skus": barcodes}
+        )
+        data = resp.json()
+        return {str(s.get("sku")): int(s.get("amount", 0)) for s in data.get("stocks", [])}
+
+    def set_fbs_stocks(self, warehouse_id: str, amounts: dict[str, int]) -> dict:
+        body = {"stocks": [{"sku": sku, "amount": amount} for sku, amount in amounts.items()]}
         resp = self._request("PUT", f"/api/v3/stocks/{warehouse_id}", json=body)
         return {"ok": resp.status_code < 300}
 

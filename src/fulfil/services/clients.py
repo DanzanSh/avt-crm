@@ -210,3 +210,57 @@ def list_clients_with_counters(db: Session, *, include_archived: bool = False) -
 
 def check_connection(wb_client: WBClient) -> dict:
     return wb_client.ping()
+
+
+# --- Склад WB клиента (Этап 2 плана №3, п.2.2) -------------------------------
+# «Оба варианта — выбрать существующий из списка или создать через API» —
+# согласовано с заказчиком (см. шапку план-доработок-3.md). Свободный ввод
+# ID/названия склада убран из формы клиента: он давал опечатки, которые
+# всплывали только при первой реальной передаче остатка.
+
+
+def list_wb_offices(wb_client: WBClient) -> list[dict]:
+    return wb_client.list_offices()
+
+
+def list_wb_warehouses(wb_client: WBClient) -> list[dict]:
+    return wb_client.list_warehouses()
+
+
+def create_wb_warehouse(
+    db: Session, client: Client, wb_client: WBClient, *, name: str, office_id: int, actor: str,
+) -> Client:
+    """Создаёт склад в WB и сразу привязывает его к клиенту — раздельного «создать,
+    а потом выбрать из списка» шага в интерфейсе нет, это одно действие."""
+    name = name.strip()
+    if not name:
+        raise AppError("Название склада не может быть пустым.", status_code=400, reason_code="invalid_name")
+
+    warehouse = wb_client.create_warehouse(name, office_id)
+    changes = {
+        "wbWarehouseId": {"from": client.wb_warehouse_id, "to": warehouse["id"]},
+        "wbWarehouseName": {"from": client.wb_warehouse_name, "to": warehouse["name"]},
+    }
+    client.wb_warehouse_id = warehouse["id"]
+    client.wb_warehouse_name = warehouse["name"]
+    audit.record(db, entity_type="client", entity_id=client.id, action="update", actor=actor, changes=changes)
+    db.commit()
+    db.refresh(client)
+    return client
+
+
+def set_wb_warehouse(
+    db: Session, client: Client, *, warehouse_id: str, warehouse_name: str, actor: str,
+) -> Client:
+    """Привязывает УЖЕ существующий в WB склад (выбор из GET .../wb-warehouses) —
+    в отличие от create_wb_warehouse, ничего не создаёт на стороне WB."""
+    changes = {
+        "wbWarehouseId": {"from": client.wb_warehouse_id, "to": warehouse_id},
+        "wbWarehouseName": {"from": client.wb_warehouse_name, "to": warehouse_name},
+    }
+    client.wb_warehouse_id = warehouse_id
+    client.wb_warehouse_name = warehouse_name
+    audit.record(db, entity_type="client", entity_id=client.id, action="update", actor=actor, changes=changes)
+    db.commit()
+    db.refresh(client)
+    return client

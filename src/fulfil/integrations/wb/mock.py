@@ -2,12 +2,18 @@
 
 Этап 1: одна карточка с несколькими размерами (чтобы тесты и dev-стенд ловили
 разворот sizes[] в отдельные товары), и баркоды/номера заказов зависят от client_id —
-два клиента в мок-режиме не видят одинаковых данных, это и проверяют test_clients.py."""
+два клиента в мок-режиме не видят одинаковых данных, это и проверяют test_clients.py.
+
+Этап 2: остатки FBS хранятся per-warehouse ({barcode: amount}) и PUT-семантика WB
+(«задать», не «прибавить») воспроизведена честно — set_fbs_stocks() перезаписывает
+значение целиком, поэтому тест «передать 5, потом 3» видит именно 8, только если
+вызывающая сторона (services.stock.transfer_to_fbs) сама прочитала текущее значение
+через get_fbs_stocks() и прибавила qty."""
 
 import base64
 import uuid
 
-from fulfil.integrations.wb.base import WbCardsPage, WbCursor, WbOrder, WbSticker
+from fulfil.integrations.wb.base import WbCardsPage, WbCursor, WbOffice, WbOrder, WbSticker, WbWarehouse
 
 
 def _fixture_cards(client_id: int) -> list[dict]:
@@ -58,12 +64,34 @@ class WBMockClient:
         self._orders: list[dict] = []
         self._supplies: dict[str, dict] = {}
         self._cards_served = False
+        # Склад WB клиента (Этап 2, п.2.2/2.3) — фикстура двух готовых пунктов приёма
+        # и пустого списка складов, чтобы тест мог проверить и выбор существующего,
+        # и создание нового. _stocks — per-warehouse {barcode: amount}, имитирует
+        # реальное поведение WB: PUT задаёт значение целиком, а не прибавляет.
+        self._offices: list[WbOffice] = [
+            {"id": 1, "name": "Коледино", "address": "Московская обл., Коледино"},
+            {"id": 2, "name": "Электросталь", "address": "Московская обл., Электросталь"},
+        ]
+        self._warehouses: list[WbWarehouse] = []
+        self._stocks: dict[str, dict[str, int]] = {}
 
     def ping(self) -> dict:
         return {
             "marketplace": {"ok": True, "error": None},
             "content": {"ok": True, "error": None},
         }
+
+    # --- Склад WB клиента ---
+    def list_offices(self) -> list[WbOffice]:
+        return list(self._offices)
+
+    def list_warehouses(self) -> list[WbWarehouse]:
+        return list(self._warehouses)
+
+    def create_warehouse(self, name: str, office_id: int) -> WbWarehouse:
+        warehouse: WbWarehouse = {"id": f"WH-{self._client_id}-{len(self._warehouses) + 1}", "name": name}
+        self._warehouses.append(warehouse)
+        return warehouse
 
     def get_product_cards(self, cursor: WbCursor | None = None) -> WbCardsPage:
         # Инкрементальный синк: с сохранённым курсором мок отдаёт пусто (total 0 < limit),
@@ -78,8 +106,13 @@ class WBMockClient:
             "cursor": {"updatedAt": "2026-01-01T00:00:00Z", "nmID": 100001, "total": 1},
         }
 
-    def update_fbs_stock(self, warehouse_id: str, barcode: str, qty: int) -> dict:
-        return {"ok": True, "warehouseId": warehouse_id, "barcode": barcode, "qty": qty}
+    def get_fbs_stocks(self, warehouse_id: str, barcodes: list[str]) -> dict[str, int]:
+        stocks = self._stocks.get(warehouse_id, {})
+        return {b: stocks.get(b, 0) for b in barcodes}
+
+    def set_fbs_stocks(self, warehouse_id: str, amounts: dict[str, int]) -> dict:
+        self._stocks.setdefault(warehouse_id, {}).update(amounts)
+        return {"ok": True}
 
     def get_new_orders(self) -> list[WbOrder]:
         if self._orders:

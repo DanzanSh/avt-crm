@@ -153,6 +153,83 @@ def test_get_product_cards_sends_content_base_and_incremental_cursor(monkeypatch
     assert seen["json"]["settings"]["sort"] == {"ascending": True}
 
 
+def test_list_offices_maps_fields(monkeypatch):
+    client = WBHttpClient("test-token")
+    payload = [{"id": 1, "name": "Коледино", "address": "МО"}]
+    monkeypatch.setattr(client, "_request", lambda *a, **kw: _Resp(payload))
+
+    offices = client.list_offices()
+    assert offices == [{"id": 1, "name": "Коледино", "address": "МО"}]
+
+
+def test_list_warehouses_maps_fields(monkeypatch):
+    client = WBHttpClient("test-token")
+    payload = [{"id": 12345, "name": "Мой склад"}]
+    monkeypatch.setattr(client, "_request", lambda *a, **kw: _Resp(payload))
+
+    warehouses = client.list_warehouses()
+    assert warehouses == [{"id": "12345", "name": "Мой склад"}]
+
+
+def test_create_warehouse_posts_name_and_office_id(monkeypatch):
+    client = WBHttpClient("test-token")
+    seen = {}
+
+    def _fake_request(method, path, *, base=None, json=None, **kw):
+        seen.update(method=method, path=path, json=json)
+        return _Resp({"id": 999})
+
+    monkeypatch.setattr(client, "_request", _fake_request)
+    warehouse = client.create_warehouse("Фулфилмент Х", office_id=7)
+
+    assert seen == {
+        "method": "POST", "path": "/api/v3/warehouses",
+        "json": {"name": "Фулфилмент Х", "officeId": 7},
+    }
+    assert warehouse == {"id": "999", "name": "Фулфилмент Х"}
+
+
+def test_get_fbs_stocks_reads_current_amounts(monkeypatch):
+    """PUT у WB задаёт остаток, а не прибавляет к нему — эта ручка обязана
+    вернуть ТЕКУЩЕЕ значение, которое вызывающая сторона потом прибавит к qty
+    (Этап 2, п.2.3)."""
+    client = WBHttpClient("test-token")
+    seen = {}
+
+    def _fake_request(method, path, *, base=None, json=None, **kw):
+        seen.update(method=method, path=path, json=json)
+        return _Resp({"stocks": [{"sku": "2000000012345", "amount": 5}]})
+
+    monkeypatch.setattr(client, "_request", _fake_request)
+    amounts = client.get_fbs_stocks("WH-1", ["2000000012345"])
+
+    assert seen == {"method": "POST", "path": "/api/v3/stocks/WH-1", "json": {"skus": ["2000000012345"]}}
+    assert amounts == {"2000000012345": 5}
+
+
+def test_get_fbs_stocks_skips_request_for_empty_barcodes(monkeypatch):
+    client = WBHttpClient("test-token")
+    monkeypatch.setattr(client, "_request", lambda *a, **kw: pytest.fail("не должно дойти до сети"))
+    assert client.get_fbs_stocks("WH-1", []) == {}
+
+
+def test_set_fbs_stocks_sends_batch(monkeypatch):
+    client = WBHttpClient("test-token")
+    seen = {}
+
+    def _fake_request(method, path, *, base=None, json=None, **kw):
+        seen.update(method=method, path=path, json=json)
+        resp = httpx.Response(200)
+        return resp
+
+    monkeypatch.setattr(client, "_request", _fake_request)
+    result = client.set_fbs_stocks("WH-1", {"2000000012345": 8})
+
+    assert seen["method"] == "PUT" and seen["path"] == "/api/v3/stocks/WH-1"
+    assert seen["json"] == {"stocks": [{"sku": "2000000012345", "amount": 8}]}
+    assert result == {"ok": True}
+
+
 def test_ping_checks_both_hosts(monkeypatch):
     client = WBHttpClient("test-token")
     seen_bases = []
