@@ -1,7 +1,7 @@
 from fulfil.models.client import Client
 from fulfil.models.product import Product
 from fulfil.models.storage import Zone, Rack, Shelf, Cell, CellAllowedBarcode, CellStatus
-from fulfil.models.receiving import Receipt, ReceiptLine, ReceiptStatus
+from fulfil.models.receiving import Receipt, ReceiptLine, ReceiptPlanLine, ReceiptStatus
 from fulfil.models.stock import (
     StockByCell,
     StockMove,
@@ -36,6 +36,7 @@ __all__ = [
     "CellStatus",
     "Receipt",
     "ReceiptLine",
+    "ReceiptPlanLine",
     "ReceiptStatus",
     "StockByCell",
     "StockMove",

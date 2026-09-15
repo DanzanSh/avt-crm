@@ -163,8 +163,12 @@ def list_products(
     if client_id is not None:
         stmt = stmt.where(Product.client_id == client_id)
     if search:
+        # Поиск по названию, ШК ИЛИ артикулу — нужен ручному режиму приёмки (Этап 5,
+        # п.5.2: "поиск товара клиента по названию, ШК или артикулу").
         like = f"%{search}%"
-        stmt = stmt.where(Product.name.ilike(like) | Product.barcode.ilike(like))
+        stmt = stmt.where(
+            Product.name.ilike(like) | Product.barcode.ilike(like) | Product.vendor_code.ilike(like)
+        )
     # Значения фильтров приходят из выпадающих списков, а не вводятся руками,
     # поэтому сравнение точное — в отличие от search с его ilike.
     for field, value in zip(FILTER_FIELDS, (name, size, color, brand)):

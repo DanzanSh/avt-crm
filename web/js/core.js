@@ -189,6 +189,8 @@
               ? `type="number"${f.min !== undefined ? ` min="${esc(f.min)}"` : ''}`
               : f.type === 'password'
               ? 'type="password"'
+              : f.type === 'date'
+              ? 'type="date"'
               : 'type="text"';
           return `
             <div>

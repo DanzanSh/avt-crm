@@ -3,13 +3,81 @@ import datetime as dt
 from fulfil.schemas.common import CamelModel
 
 
-class PlaceRequest(CamelModel):
+class CreateReceiptRequest(CamelModel):
+    client_id: int
+    expected_date: dt.date | None = None
+    comment: str | None = None
+
+
+class UpdateReceiptRequest(CamelModel):
+    expected_date: dt.date | None = None
+    comment: str | None = None
+
+
+class PlanLineIn(CamelModel):
+    """Ручной ввод строки плана: товар ищут по баркоду (GET /products?search=),
+    поэтому сюда приходит баркод, а не productId — так же, как скан."""
+
+    barcode: str
+    qty: int
+
+
+class SetPlanRequest(CamelModel):
+    lines: list[PlanLineIn]
+
+
+class PlanLineOut(CamelModel):
+    product_id: int
+    product_name: str
+    barcode: str
+    size: str | None = None
+    color: str | None = None
+    expected_qty: int
+    suggested_cell: str | None = None
+
+
+class ImportPlanResultOut(CamelModel):
+    ok: bool
+    imported: int
+    errors: list[str] = []
+
+
+class ManualAcceptLine(CamelModel):
+    product_id: int
+    qty: int
+    cell_code: str
+
+
+class AcceptManualRequest(CamelModel):
+    lines: list[ManualAcceptLine]
+
+
+class ScanPlaceRequest(CamelModel):
     product_barcode: str
     cell_code: str  # то, что отсканировали: id / CELL-xxx / адрес — сервер сам разберёт
     qty: int
-    # Не передан и в фильтре выбраны «Все клиенты» — фронт обязан спросить клиента
-    # до скана; если баркод неоднозначен между клиентами — 409 со списком кандидатов.
-    client_id: int | None = None
+
+
+class ProgressLineOut(CamelModel):
+    product_id: int
+    product_name: str
+    barcode: str
+    size: str | None = None
+    color: str | None = None
+    expected_qty: int
+    accepted_qty: int
+    diff: int
+    planned: bool
+
+
+class ProgressTotalsOut(CamelModel):
+    expected_qty: int
+    accepted_qty: int
+
+
+class ProgressOut(CamelModel):
+    lines: list[ProgressLineOut]
+    totals: ProgressTotalsOut
 
 
 class ReceiptLineHistoryOut(CamelModel):
@@ -31,3 +99,18 @@ class ReceiptOut(CamelModel):
     client_name: str | None = None
     number: str
     status: str
+    expected_date: dt.date | None = None
+    comment: str | None = None
+    created_by: str | None = None
+    created_at: dt.datetime
+    started_at: dt.datetime | None = None
+    finished_at: dt.datetime | None = None
+    plan_lines_count: int = 0
+    expected_total: int = 0
+    accepted_total: int = 0
+
+
+class ReceiptCountersOut(CamelModel):
+    expected: int
+    in_progress: int
+    done: int

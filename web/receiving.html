@@ -9,278 +9,906 @@
   <script src="/js/scan-layout.js"></script>
   <script src="/js/scanner.js"></script>
   <style>
-    /* Панель скана залита синим секции карты склада (.zone-block), чтобы главное
-       действие страницы читалось как отдельный блок. Само поле ввода остаётся
-       белым: крупный моноширинный скан на синем читается плохо. */
+    .tabs { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 16px; }
+    .tab-tile { cursor: pointer; border: 1px solid var(--border); min-width: 130px; }
+    .tab-tile:hover { filter: brightness(1.05); }
+    .tab-tile.active { outline: 2px solid var(--blue); }
+    .back-link { color: var(--blue); text-decoration: none; font-size: 15px; }
+    .receipt-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; }
+    .receipt-head .num { font-family: var(--mono); font-size: 20px; color: var(--text); }
+    .receipt-meta { font-size: 15px; color: var(--text-2); margin-bottom: 18px; }
+    .section-title { font-size: 18px; font-weight: 700; margin: 22px 0 10px; }
+    .no-mobile-cards td.num { text-align: right; }
+    tr.row-shortage td.num.diff { color: var(--red); }
+    tr.row-excess td.num.diff { color: var(--orange); }
+    tr.row-match td.num.diff { color: var(--green); }
+    tr.row-unplanned { background: var(--orange-soft); }
+    .plan-search { position: relative; max-width: 480px; }
+    .plan-search-results {
+      display: flex; flex-direction: column; gap: 4px; margin-top: 8px;
+      max-height: 260px; overflow: auto;
+    }
+    .plan-search-item {
+      display: flex; justify-content: space-between; align-items: center; gap: 10px;
+      padding: 8px 10px; background: var(--card); border: 1px solid var(--border);
+      border-radius: var(--radius-sm); font-size: 15px;
+    }
+    .plan-search-item .meta { color: var(--muted); font-size: 13px; }
+    .qty-cell-input { width: 90px; }
+    .cell-cell-input { width: 130px; font-family: var(--mono); }
+    .mode-tabs { display: flex; gap: 8px; margin-bottom: 14px; }
+    .mode-btn {
+      padding: 8px 14px; border-radius: var(--radius-sm); border: 1px solid var(--border);
+      background: var(--card); color: var(--text-2); cursor: pointer; font-size: 15px; font-weight: 600;
+    }
+    .mode-btn.active { background: var(--blue); color: #fff; border-color: transparent; }
     .scan-panel {
       max-width: 480px; display: flex; flex-direction: column; gap: 12px;
-      padding: 18px; margin-bottom: 18px;
-      background: rgba(53, 96, 189, 0.5);
+      padding: 18px; margin-bottom: 18px; background: rgba(53, 96, 189, 0.5);
     }
-    /* Подписи на заливке: --muted (#8792a3) на ней даёт контраст ~1.9:1. */
     .step-hint { color: rgba(24, 34, 51, 0.75); font-size: 14px; line-height: 1.2; }
     [data-theme="dark"] .step-hint { color: rgba(229, 231, 235, 0.85); }
     .scan-input { font-family: var(--mono); font-size: 23px; text-align: center; background: var(--card); border-color: transparent; }
     .product-preview {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      gap: 12px;
-      padding: 10px;
-      font-size: 16px;
-      color: var(--text-2);
-      background: var(--card);
-      border-radius: var(--radius-sm);
+      display: flex; justify-content: space-between; align-items: center; gap: 12px;
+      padding: 10px; font-size: 16px; color: var(--text-2); background: var(--card); border-radius: var(--radius-sm);
     }
     .qty-row { display: flex; gap: 8px; align-items: center; }
     .qty-row input { text-align: center; font-size: 23px; }
-    .log-panel { padding: 18px; }
-    .log-panel h2 { font-size: 18px; font-weight: 700; margin: 0 0 12px; }
     .log-item {
-      display: flex;
-      justify-content: space-between;
-      gap: 16px;
-      padding: 9px 0;
-      border-bottom: 1px solid var(--divider);
-      font-size: 16px;
-      color: var(--text-2);
+      display: flex; justify-content: space-between; gap: 16px; padding: 9px 0;
+      border-bottom: 1px solid var(--divider); font-size: 16px; color: var(--text-2);
     }
     .log-item:last-child { border-bottom: none; }
-    /* Тоже на синей заливке .scan-panel — см. .step-hint выше. */
     .scanner-note { font-size: 14px; color: rgba(24, 34, 51, 0.7); line-height: 1.2; }
     [data-theme="dark"] .scanner-note { color: rgba(229, 231, 235, 0.75); }
+    .plan-toolbar { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 14px; }
+    .totals-row { font-size: 15px; color: var(--text-2); margin: 10px 0; }
   </style>
 </head>
 <body>
-  <div class="page-head"><h1 class="page-title">Приёмка товара</h1></div>
-
-  <div id="clientFilterMount" style="margin-bottom:14px;"></div>
-
-  <div class="card scan-panel">
-    <div class="step-hint" id="stepHint">Сейчас нужно: отсканировать баркод товара</div>
-
-    <input
-      class="input scan-input"
-      id="scanInput"
-      data-scan
-      autofocus
-      placeholder="Скан или ручной ввод + Enter…"
-      autocomplete="off"
-    />
-    <div class="scanner-note">
-      Сканер работает независимо от фокуса на поле — можно сканировать, даже кликнув в другое место.
+  <div id="listView">
+    <div class="page-head">
+      <h1 class="page-title">Приёмка</h1>
+      <div class="toolbar">
+        <button class="btn btn-primary" id="btnCreateReceipt">+ Создать приёмку</button>
+      </div>
     </div>
 
-    <div id="productPreview" style="display:none" class="product-preview">
-      <span id="productName"></span>
-      <span id="productBarcode" style="color:var(--muted); font-family:var(--mono)"></span>
-    </div>
+    <div id="listClientFilterMount" style="margin-bottom:14px;"></div>
 
-    <div id="qtyRow" class="qty-row" style="display:none">
-      <button class="btn" type="button" id="qtyMinus">−</button>
-      <input class="input" id="qtyInput" type="number" min="1" value="1" />
-      <button class="btn" type="button" id="qtyPlus">+</button>
-      <button class="btn btn-primary" type="button" id="qtyConfirm">Далее — скан ячейки</button>
-    </div>
+    <div class="tabs" id="tabs"></div>
+
+    <div id="list">Загрузка…</div>
   </div>
 
-  <div class="card log-panel">
-    <h2>Последние операции</h2>
-    <div id="log"></div>
+  <div id="detailView" style="display:none">
+    <a class="back-link" href="/receiving.html">← Ко всем приёмкам</a>
+    <div id="detailBody">Загрузка…</div>
   </div>
 
   <script src="/js/sidebar.js"></script>
   <script>
-    // Состояние приёмки не сбрасывается при ошибке — оператор может просто сканировать снова
-    // (см. DEV-PLAN.md, идиома mobile-putaway.html эталона). Классификация кода — на сервере
-    // (/scan/resolve), фронт больше не гадает по стадии, что он отсканировал
-    // (FEATURES-PLAN.md, дефект №3 — раньше скан неизвестного баркода брал products[0]).
-    let stage = 'product'; // 'product' | 'qty' | 'cell'
-    let pendingProduct = null;
-    let pendingQty = 1;
-    let placing = false; // защита от повторной обработки, пока идёт запрос
+    const params = new URLSearchParams(location.search);
+    const receiptId = params.get('id') ? Number(params.get('id')) : null;
 
-    const input = document.getElementById('scanInput');
-    const hint = document.getElementById('stepHint');
-    const preview = document.getElementById('productPreview');
-    const qtyRow = document.getElementById('qtyRow');
-    const qtyInput = document.getElementById('qtyInput');
-    const log = document.getElementById('log');
+    const STATUS_LABELS = {
+      draft: ['Ожидается', 'badge-muted'],
+      in_progress: ['Идёт приёмка', 'badge-blue'],
+      done: ['Завершена', 'badge-green'],
+    };
 
-    function resetToProductStage() {
-      stage = 'product';
-      pendingProduct = null;
-      preview.style.display = 'none';
-      qtyRow.style.display = 'none';
-      hint.textContent = 'Сейчас нужно: отсканировать баркод товара';
-      input.value = '';
+    const TABS = [
+      { key: 'expected', label: 'Ожидаются' },
+      { key: 'in_progress', label: 'В работе' },
+      { key: 'done', label: 'Завершены' },
+    ];
+
+    function fmtDate(iso) {
+      if (!iso) return '';
+      const d = new Date(iso);
+      if (isNaN(d)) return String(iso);
+      return d.toLocaleDateString('ru-RU');
     }
 
-    // Если в фильтре выбраны «Все клиенты» — баркод, отсканированный без указания
-    // клиента, может оказаться неоднозначным (есть у нескольких сразу, Этап 1, п.1.4).
-    // Просим выбрать клиента ДО скана, а не разбираться с 409 постфактум.
-    function refreshClientGate() {
-      const hasClient = !!Fulfil.clientFilter.clientId;
-      input.disabled = !hasClient;
-      if (!hasClient) {
-        hint.textContent = 'Сначала выберите клиента вверху страницы';
-      } else if (stage === 'product') {
-        hint.textContent = 'Сейчас нужно: отсканировать баркод товара';
-      }
-    }
-
-    function fmtTime(iso) {
+    function fmtDateTime(iso) {
       if (!iso) return '';
       const d = new Date(iso);
       if (isNaN(d)) return '';
-      const p = (n) => String(n).padStart(2, '0');
-      return `${p(d.getDate())}.${p(d.getMonth() + 1)} ${p(d.getHours())}:${p(d.getMinutes())}`;
+      return d.toLocaleString('ru-RU');
     }
 
-    // ok=true → row это объект строки истории; ok=false → row это текст ошибки
-    // (транзиентная отметка, в БД не пишется — это ок).
-    function renderRow(row, ok = true) {
-      const div = document.createElement('div');
-      div.className = 'log-item';
-      const text = ok
-        ? `${row.productName} · ${row.qty} шт · ${row.cellAddress}${row.clientName ? ' · ' + row.clientName : ''}`
-        : String(row);
-      const time = ok ? fmtTime(row.createdAt) : '';
-      div.innerHTML =
-        `<span>${Fulfil.esc(text)}</span>` +
-        `<span>${time ? `<span style="color:var(--muted); margin-right:8px;">${Fulfil.esc(time)}</span>` : ''}` +
-        `<span style="color:${ok ? 'var(--green)' : 'var(--red)'}">${ok ? '✓' : '✗'}</span></span>`;
-      log.prepend(div);
-    }
-
-    async function loadHistory() {
-      try {
-        const q = Fulfil.clientFilter.clientId ? `&client_id=${Fulfil.clientFilter.clientId}` : '';
-        const rows = await Fulfil.api('GET', '/receiving/history?limit=50' + q);
-        log.innerHTML = '';
-        // сервер отдаёт newest-first; prepend в обратном порядке сохраняет его
-        for (let i = rows.length - 1; i >= 0; i--) renderRow(rows[i], true);
-      } catch (err) {
-        // история не критична для приёмки — тихо игнорируем, покажем при следующем place
+    async function downloadFile(path, filename) {
+      const resp = await fetch('/api/v1' + path, { headers: { Authorization: 'Bearer ' + Fulfil.getToken() } });
+      if (!resp.ok) {
+        let serverError = null;
+        try { serverError = await resp.json(); } catch (e) {}
+        throw Object.assign({ status: resp.status }, serverError);
       }
+      const blob = await resp.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      a.click();
+      URL.revokeObjectURL(url);
     }
 
-    async function classify(code) {
-      try {
-        const clientId = Fulfil.clientFilter.clientId || undefined;
-        return await Fulfil.api('POST', '/scan/resolve', { code, clientId });
-      } catch (err) {
-        Scanner.beep('error');
-        Fulfil.toast(Fulfil.errorText(err), 'error');
-        renderRow(Fulfil.errorText(err), false);
-        return null;
-      }
-    }
+    // ============================= СПИСОК =============================
 
-    async function handleProductCode(code) {
-      const result = await classify(code);
-      if (!result) return;
-      if (result.kind !== 'product') {
-        Scanner.beep('error');
-        Fulfil.toast('Это код ячейки, а не товара — сначала отсканируйте товар.', 'error');
-        return;
-      }
-      Scanner.beep('ok');
-      pendingProduct = result.product;
-      document.getElementById('productName').textContent = pendingProduct.name;
-      document.getElementById('productBarcode').textContent = pendingProduct.barcode;
-      preview.style.display = 'flex';
-      qtyRow.style.display = 'flex';
-      qtyInput.value = 1;
-      qtyInput.focus();
-      qtyInput.select();
-      stage = 'qty';
-      hint.textContent = 'Укажите количество, затем отсканируйте ячейку';
-      input.value = '';
-    }
+    if (!receiptId) {
+      let currentGroup = 'expected';
 
-    async function handleCellCode(code) {
-      if (placing) return; // повторный скан во время выполнения запроса — игнорируем
-      const result = await classify(code);
-      if (!result) return;
-      if (result.kind !== 'cell') {
-        Scanner.beep('error');
-        Fulfil.toast('Это код товара, а не ячейки — отсканируйте ячейку.', 'error');
-        return;
-      }
-
-      placing = true;
-      const idempotencyKey = Fulfil.newIdempotencyKey();
-      try {
-        const clientId = Fulfil.clientFilter.clientId || undefined;
-        const res = await Fulfil.api(
-          'POST',
-          '/receiving/place',
-          { productBarcode: pendingProduct.barcode, cellCode: result.cell.address, qty: pendingQty, clientId },
-          { 'X-Idempotency-Key': idempotencyKey }
+      function renderTabs(counters) {
+        counters = counters || {};
+        const el = document.getElementById('tabs');
+        const map = { expected: counters.expected, in_progress: counters.inProgress, done: counters.done };
+        el.innerHTML = TABS.map(
+          (t) => `
+          <div class="card stat-card tab-tile${currentGroup === t.key ? ' active' : ''}" data-group="${t.key}">
+            <span class="stat-card__label">${t.label}</span>
+            <span class="stat-card__value">${map[t.key] || 0}</span>
+          </div>`
+        ).join('');
+        el.querySelectorAll('.tab-tile').forEach((tile) =>
+          tile.addEventListener('click', () => {
+            currentGroup = tile.dataset.group;
+            load();
+          })
         );
+      }
+
+      async function loadCounters() {
+        try {
+          const q = Fulfil.clientFilter.clientId ? `?client_id=${Fulfil.clientFilter.clientId}` : '';
+          renderTabs(await Fulfil.api('GET', '/receiving/counters' + q));
+        } catch (err) {
+          renderTabs({});
+        }
+      }
+
+      async function load() {
+        loadCounters();
+        const list = document.getElementById('list');
+        try {
+          const p = new URLSearchParams();
+          if (Fulfil.clientFilter.clientId) p.set('client_id', Fulfil.clientFilter.clientId);
+          if (currentGroup) p.set('group', currentGroup);
+          const receipts = await Fulfil.api('GET', '/receiving?' + p.toString());
+          if (!receipts.length) {
+            list.innerHTML = '<div class="empty-state">Приёмок в этой вкладке нет</div>';
+            return;
+          }
+          list.innerHTML = `
+            <div class="card" style="overflow:auto">
+              <table class="no-mobile-cards">
+                <thead><tr>
+                  <th>№</th><th>Клиент</th><th>Ожидается</th><th class="num">Позиций</th>
+                  <th class="num">Заявлено</th><th class="num">Принято</th><th class="num">Расхождение</th><th>Статус</th>
+                </tr></thead>
+                <tbody>
+                  ${receipts
+                    .map((r) => {
+                      const [label, cls] = STATUS_LABELS[r.status] || [r.status, 'badge-muted'];
+                      const diff = r.acceptedTotal - r.expectedTotal;
+                      return `
+                      <tr class="row-link" data-id="${r.id}" style="cursor:pointer">
+                        <td data-label="№">${Fulfil.esc(r.number)}</td>
+                        <td data-label="Клиент">${Fulfil.esc(r.clientName || '')}</td>
+                        <td data-label="Ожидается">${fmtDate(r.expectedDate)}</td>
+                        <td data-label="Позиций" class="num">${r.planLinesCount}</td>
+                        <td data-label="Заявлено" class="num">${r.expectedTotal}</td>
+                        <td data-label="Принято" class="num">${r.acceptedTotal}</td>
+                        <td data-label="Расхождение" class="num">${diff > 0 ? '+' + diff : diff}</td>
+                        <td data-label="Статус"><span class="badge ${cls}">${label}</span></td>
+                      </tr>`;
+                    })
+                    .join('')}
+                </tbody>
+              </table>
+            </div>`;
+          list.querySelectorAll('.row-link').forEach((row) =>
+            row.addEventListener('click', () => {
+              location.href = '/receiving.html?id=' + row.dataset.id;
+            })
+          );
+        } catch (err) {
+          list.innerHTML = `<div class="empty-state">${Fulfil.esc(Fulfil.errorText(err))}</div>`;
+        }
+      }
+
+      document.getElementById('btnCreateReceipt').addEventListener('click', async () => {
+        let clients = [];
+        try {
+          clients = await Fulfil.api('GET', '/clients');
+        } catch (err) {
+          Fulfil.toast(Fulfil.errorText(err), 'error');
+          return;
+        }
+        if (!clients.length) {
+          Fulfil.toast('Сначала добавьте клиента в разделе «Клиенты»', 'error');
+          return;
+        }
+        const values = await Fulfil.formModal({
+          title: 'Новая приёмка',
+          submitLabel: 'Создать',
+          fields: [
+            {
+              id: 'clientId', label: 'Клиент', type: 'select', required: true,
+              value: Fulfil.clientFilter.clientId || clients[0].id,
+              options: clients.map((c) => ({ value: c.id, label: c.name })),
+            },
+            { id: 'expectedDate', label: 'Ожидаемая дата', type: 'date' },
+            { id: 'comment', label: 'Комментарий', type: 'textarea' },
+          ],
+        });
+        if (!values) return;
+        try {
+          const receipt = await Fulfil.api('POST', '/receiving', {
+            clientId: Number(values.clientId),
+            expectedDate: values.expectedDate || null,
+            comment: values.comment || null,
+          });
+          location.href = '/receiving.html?id=' + receipt.id;
+        } catch (err) {
+          Fulfil.toast(Fulfil.errorText(err), 'error');
+        }
+      });
+
+      Fulfil.clientFilter.mount(document.getElementById('listClientFilterMount'), load).then(load);
+    }
+
+    // ============================= КАРТОЧКА =============================
+
+    if (receiptId) {
+      document.getElementById('listView').style.display = 'none';
+      document.getElementById('detailView').style.display = '';
+
+      let receipt = null;
+      let planRows = []; // {barcode, productName, qty} — редактируемый черновик плана (DRAFT)
+      let mode = 'scanner'; // 'scanner' | 'manual' — режим проведения (IN_PROGRESS)
+
+      async function loadReceipt() {
+        receipt = await Fulfil.api('GET', `/receiving/${receiptId}`);
+        return receipt;
+      }
+
+      function renderHead() {
+        const [label, cls] = STATUS_LABELS[receipt.status] || [receipt.status, 'badge-muted'];
+        return `
+          <div class="card" style="margin-bottom:18px;">
+            <div class="receipt-head">
+              <span class="num">${Fulfil.esc(receipt.number)}</span>
+              <span class="badge badge-muted">${Fulfil.esc(receipt.clientName || '')}</span>
+              <span class="badge ${cls}">${label}</span>
+              <button class="btn btn-sm" id="btnEditReceipt" style="margin-left:auto">Изменить</button>
+            </div>
+            <div class="receipt-meta">
+              ${receipt.expectedDate ? 'Ожидается: ' + fmtDate(receipt.expectedDate) : 'Дата не указана'}
+              ${receipt.comment ? ' · ' + Fulfil.esc(receipt.comment) : ''}
+              ${receipt.createdBy ? ' · создал ' + Fulfil.esc(receipt.createdBy) : ''}
+              ${receipt.startedAt ? ' · начата ' + fmtDateTime(receipt.startedAt) : ''}
+              ${receipt.finishedAt ? ' · завершена ' + fmtDateTime(receipt.finishedAt) : ''}
+            </div>
+          </div>`;
+      }
+
+      function bindHead() {
+        document.getElementById('btnEditReceipt').addEventListener('click', async () => {
+          const values = await Fulfil.formModal({
+            title: 'Изменить приёмку',
+            submitLabel: 'Сохранить',
+            fields: [
+              { id: 'expectedDate', label: 'Ожидаемая дата', type: 'date', value: receipt.expectedDate || '' },
+              { id: 'comment', label: 'Комментарий', type: 'textarea', value: receipt.comment || '' },
+            ],
+          });
+          if (!values) return;
+          try {
+            receipt = await Fulfil.api('PATCH', `/receiving/${receiptId}`, {
+              expectedDate: values.expectedDate || null,
+              comment: values.comment || null,
+            });
+            renderDetail();
+          } catch (err) {
+            Fulfil.toast(Fulfil.errorText(err), 'error');
+          }
+        });
+      }
+
+      // --- DRAFT: план ---
+
+      function planTotalsHtml() {
+        const total = planRows.reduce((sum, r) => sum + (Number(r.qty) || 0), 0);
+        return `<div class="totals-row">Строк: ${planRows.length} · заявлено штук: ${total}</div>`;
+      }
+
+      function planTableHtml() {
+        if (!planRows.length) return '<div class="empty-state">План пуст — добавьте товары вручную или загрузите xlsx</div>';
+        return `
+          <div class="card" style="overflow:auto">
+            <table class="no-mobile-cards">
+              <thead><tr><th>Товар</th><th>Баркод</th><th class="num">Кол-во</th><th></th></tr></thead>
+              <tbody>
+                ${planRows
+                  .map(
+                    (r, i) => `
+                  <tr>
+                    <td data-label="Товар">${Fulfil.esc(r.productName)}</td>
+                    <td data-label="Баркод" style="font-family:var(--mono)">${Fulfil.esc(r.barcode)}</td>
+                    <td data-label="Кол-во" class="num">
+                      <input class="input qty-cell-input" type="number" min="1" value="${r.qty}" data-idx="${i}" data-role="plan-qty" />
+                    </td>
+                    <td><button class="btn btn-sm" data-idx="${i}" data-role="plan-remove">Убрать</button></td>
+                  </tr>`
+                  )
+                  .join('')}
+              </tbody>
+            </table>
+          </div>`;
+      }
+
+      function renderDraftSection() {
+        return `
+          <div class="section-title">План приёмки</div>
+          <div class="plan-toolbar">
+            <button class="btn" id="btnTemplate" type="button">Скачать шаблон</button>
+            <input type="file" id="planFile" accept=".xlsx" style="display:none" />
+            <button class="btn" id="btnImportPlan">Загрузить xlsx</button>
+          </div>
+          <div class="plan-search">
+            <input class="input" id="planSearch" placeholder="Найти товар по названию, ШК или артикулу…" />
+            <div class="plan-search-results" id="planSearchResults"></div>
+          </div>
+          <div id="planTable" style="margin-top:14px">${planTableHtml()}</div>
+          <div id="planTotals">${planTotalsHtml()}</div>
+          <div class="toolbar" style="margin-top:10px">
+            <button class="btn btn-primary" id="btnSavePlan">Сохранить план</button>
+            <button class="btn btn-primary" id="btnStart" ${planRows.length ? '' : 'disabled'}>Начать приёмку</button>
+          </div>`;
+      }
+
+      function refreshPlanUi() {
+        document.getElementById('planTable').innerHTML = planTableHtml();
+        document.getElementById('planTotals').innerHTML = planTotalsHtml();
+        bindPlanTableEvents();
+        const btnStart = document.getElementById('btnStart');
+        if (btnStart) btnStart.disabled = !planRows.length;
+      }
+
+      function bindPlanTableEvents() {
+        document.querySelectorAll('[data-role="plan-qty"]').forEach((inp) =>
+          inp.addEventListener('change', () => {
+            const i = Number(inp.dataset.idx);
+            planRows[i].qty = Math.max(1, Number(inp.value) || 1);
+          })
+        );
+        document.querySelectorAll('[data-role="plan-remove"]').forEach((btn) =>
+          btn.addEventListener('click', () => {
+            planRows.splice(Number(btn.dataset.idx), 1);
+            refreshPlanUi();
+          })
+        );
+      }
+
+      let planSearchTimer = null;
+      function bindDraftSection() {
+        bindPlanTableEvents();
+
+        document.getElementById('planSearch').addEventListener('input', (e) => {
+          clearTimeout(planSearchTimer);
+          const q = e.target.value.trim();
+          const resultsEl = document.getElementById('planSearchResults');
+          if (!q) {
+            resultsEl.innerHTML = '';
+            return;
+          }
+          planSearchTimer = setTimeout(async () => {
+            try {
+              const items = await Fulfil.api(
+                'GET', `/products?search=${encodeURIComponent(q)}&client_id=${receipt.clientId}`
+              );
+              resultsEl.innerHTML = items
+                .slice(0, 8)
+                .map(
+                  (p) => `
+                <div class="plan-search-item">
+                  <span>${Fulfil.esc(p.name)}<div class="meta">${Fulfil.esc(p.barcode)}${p.vendorCode ? ' · ' + Fulfil.esc(p.vendorCode) : ''}${p.size ? ' · ' + Fulfil.esc(p.size) : ''}</div></span>
+                  <button class="btn btn-sm" data-barcode="${Fulfil.esc(p.barcode)}" data-name="${Fulfil.esc(p.name)}">Добавить</button>
+                </div>`
+                )
+                .join('') || '<div class="empty-state">Ничего не найдено</div>';
+              resultsEl.querySelectorAll('button[data-barcode]').forEach((btn) =>
+                btn.addEventListener('click', () => {
+                  const barcode = btn.dataset.barcode;
+                  const existing = planRows.find((r) => r.barcode === barcode);
+                  if (existing) existing.qty += 1;
+                  else planRows.push({ barcode, productName: btn.dataset.name, qty: 1 });
+                  document.getElementById('planSearch').value = '';
+                  resultsEl.innerHTML = '';
+                  refreshPlanUi();
+                })
+              );
+            } catch (err) {
+              resultsEl.innerHTML = '';
+            }
+          }, 300);
+        });
+
+        document.getElementById('btnTemplate').addEventListener('click', async () => {
+          try {
+            await downloadFile(`/receiving/template.xlsx?client_id=${receipt.clientId}`, 'receiving-template.xlsx');
+          } catch (err) {
+            Fulfil.toast(Fulfil.errorText(err), 'error');
+          }
+        });
+
+        document.getElementById('btnImportPlan').addEventListener('click', () => {
+          document.getElementById('planFile').click();
+        });
+        document.getElementById('planFile').addEventListener('change', async (e) => {
+          const file = e.target.files[0];
+          e.target.value = '';
+          if (!file) return;
+          const formData = new FormData();
+          formData.append('file', file);
+          try {
+            const resp = await fetch(`/api/v1/receiving/${receiptId}/plan/import`, {
+              method: 'POST',
+              headers: { Authorization: 'Bearer ' + Fulfil.getToken() },
+              body: formData,
+            });
+            const data = await resp.json();
+            if (!resp.ok || data.ok === false) {
+              const errs = (data.errors || []).join('; ');
+              Fulfil.toast(errs || Fulfil.errorText(Object.assign({ status: resp.status }, data)), 'error');
+              return;
+            }
+            Fulfil.toast(`Импортировано строк: ${data.imported}`);
+            await loadPlan();
+            refreshPlanUi();
+          } catch (err) {
+            Fulfil.toast('Не удалось загрузить файл', 'error');
+          }
+        });
+
+        document.getElementById('btnSavePlan').addEventListener('click', async () => {
+          if (!planRows.length) {
+            Fulfil.toast('План пуст — добавьте хотя бы одну строку', 'error');
+            return;
+          }
+          try {
+            await Fulfil.api('POST', `/receiving/${receiptId}/plan`, {
+              lines: planRows.map((r) => ({ barcode: r.barcode, qty: r.qty })),
+            });
+            Fulfil.toast('План сохранён');
+            await loadPlan();
+            refreshPlanUi();
+          } catch (err) {
+            Fulfil.toast(Fulfil.errorText(err), 'error');
+          }
+        });
+
+        document.getElementById('btnStart').addEventListener('click', async () => {
+          try {
+            receipt = await Fulfil.api('POST', `/receiving/${receiptId}/start`);
+            renderDetail();
+          } catch (err) {
+            Fulfil.toast(Fulfil.errorText(err), 'error');
+          }
+        });
+      }
+
+      async function loadPlan() {
+        const lines = await Fulfil.api('GET', `/receiving/${receiptId}/plan`);
+        planRows = lines.map((l) => ({ barcode: l.barcode, productName: l.productName, qty: l.expectedQty }));
+      }
+
+      // --- IN_PROGRESS / DONE: прогресс ---
+
+      let progressData = { lines: [], totals: { expectedQty: 0, acceptedQty: 0 } };
+      let cellSuggestions = {}; // productId -> адрес ячейки, для подсказки в ручном режиме
+
+      async function loadProgress() {
+        progressData = await Fulfil.api('GET', `/receiving/${receiptId}/progress`);
+      }
+
+      async function loadCellSuggestions() {
+        try {
+          const lines = await Fulfil.api('GET', `/receiving/${receiptId}/plan`);
+          cellSuggestions = {};
+          lines.forEach((l) => {
+            if (l.suggestedCell) cellSuggestions[l.productId] = l.suggestedCell;
+          });
+        } catch (err) {
+          cellSuggestions = {};
+        }
+      }
+
+      function progressTableHtml(editable) {
+        if (!progressData.lines.length) {
+          return '<div class="empty-state">В плане нет строк</div>';
+        }
+        return `
+          <div class="card" style="overflow:auto">
+            <table class="no-mobile-cards">
+              <thead><tr>
+                <th>Товар</th><th>Баркод</th><th class="num">Заявлено</th><th class="num">Принято</th>
+                <th class="num">Расхождение</th>
+                ${editable ? '<th class="num">Принять</th><th>Ячейка</th>' : ''}
+              </tr></thead>
+              <tbody>
+                ${progressData.lines
+                  .map((l) => {
+                    const rowCls = !l.planned ? 'row-unplanned' : l.diff < 0 ? 'row-shortage' : l.diff > 0 ? 'row-excess' : 'row-match';
+                    const remaining = Math.max(0, l.expectedQty - l.acceptedQty);
+                    return `
+                    <tr class="${rowCls}" data-product-id="${l.productId}">
+                      <td data-label="Товар">${Fulfil.esc(l.productName)}${!l.planned ? ' <span class="badge badge-orange">не заявлено</span>' : ''}</td>
+                      <td data-label="Баркод" style="font-family:var(--mono)">${Fulfil.esc(l.barcode)}</td>
+                      <td data-label="Заявлено" class="num">${l.expectedQty}</td>
+                      <td data-label="Принято" class="num">${l.acceptedQty}</td>
+                      <td data-label="Расхождение" class="num diff">${l.diff > 0 ? '+' + l.diff : l.diff}</td>
+                      ${
+                        editable
+                          ? `<td data-label="Принять" class="num">
+                              <input class="input qty-cell-input" type="number" min="0" value="0" data-role="accept-qty" data-product-id="${l.productId}" data-remaining="${remaining}" />
+                            </td>
+                            <td data-label="Ячейка">
+                              <input class="input cell-cell-input" type="text" placeholder="A-1-1-1" value="${Fulfil.esc(cellSuggestions[l.productId] || '')}" data-role="accept-cell" data-product-id="${l.productId}" />
+                            </td>`
+                          : ''
+                      }
+                    </tr>`;
+                  })
+                  .join('')}
+              </tbody>
+            </table>
+          </div>
+          <div class="totals-row">Итого заявлено: ${progressData.totals.expectedQty} · принято: ${progressData.totals.acceptedQty}</div>`;
+      }
+
+      function renderScannerPanel() {
+        return `
+          <div class="card scan-panel">
+            <div class="step-hint" id="stepHint">Сейчас нужно: отсканировать баркод товара</div>
+            <input class="input scan-input" id="scanInput" data-scan autofocus placeholder="Скан или ручной ввод + Enter…" autocomplete="off" />
+            <div class="scanner-note">Сканер работает независимо от фокуса на поле — можно сканировать, даже кликнув в другое место.</div>
+            <div id="productPreview" style="display:none" class="product-preview">
+              <span id="productName"></span>
+              <span id="productBarcode" style="color:var(--muted); font-family:var(--mono)"></span>
+            </div>
+            <div id="qtyRow" class="qty-row" style="display:none">
+              <button class="btn" type="button" id="qtyMinus">−</button>
+              <input class="input" id="qtyInput" type="number" min="1" value="1" />
+              <button class="btn" type="button" id="qtyPlus">+</button>
+              <button class="btn btn-primary" type="button" id="qtyConfirm">Далее — скан ячейки</button>
+            </div>
+          </div>
+          <div class="card" style="padding:18px; margin-bottom:18px">
+            <h2 style="font-size:18px; font-weight:700; margin:0 0 12px">Последние операции</h2>
+            <div id="scanLog"></div>
+          </div>`;
+      }
+
+      // Состояние скан-флоу живёт ВНЕ bindScannerPanel: панель (и все её DOM-узлы)
+      // пересоздаётся заново после каждого успешного скана (refreshInProgressUi),
+      // а Scanner.onScan(cb) — подписка на глобальный document-listener (scanner.js),
+      // не привязанная к конкретным DOM-узлам. Регистрация внутри bindScannerPanel
+      // (вызывается при каждом рендере панели) копила бы обработчики и приводила
+      // к повторной обработке одного скана после переключения вкладок Сканер/Вручную.
+      const scanState = { stage: 'product', pendingProduct: null, pendingQty: 1, placing: false };
+      let scannerListenerBound = false;
+
+      function scanResetToProductStage() {
+        scanState.stage = 'product';
+        scanState.pendingProduct = null;
+        const preview = document.getElementById('productPreview');
+        const qtyRow = document.getElementById('qtyRow');
+        const hint = document.getElementById('stepHint');
+        const input = document.getElementById('scanInput');
+        if (preview) preview.style.display = 'none';
+        if (qtyRow) qtyRow.style.display = 'none';
+        if (hint) hint.textContent = 'Сейчас нужно: отсканировать баркод товара';
+        if (input) input.value = '';
+      }
+
+      function scanRenderRow(text, ok) {
+        const log = document.getElementById('scanLog');
+        if (!log) return;
+        const div = document.createElement('div');
+        div.className = 'log-item';
+        div.innerHTML =
+          `<span>${Fulfil.esc(text)}</span>` +
+          `<span style="color:${ok ? 'var(--green)' : 'var(--red)'}">${ok ? '✓' : '✗'}</span>`;
+        log.prepend(div);
+      }
+
+      async function scanClassify(code) {
+        try {
+          return await Fulfil.api('POST', '/scan/resolve', { code, clientId: receipt.clientId });
+        } catch (err) {
+          Scanner.beep('error');
+          Fulfil.toast(Fulfil.errorText(err), 'error');
+          scanRenderRow(Fulfil.errorText(err), false);
+          return null;
+        }
+      }
+
+      async function scanHandleProductCode(code) {
+        const result = await scanClassify(code);
+        if (!result) return;
+        if (result.kind !== 'product') {
+          Scanner.beep('error');
+          Fulfil.toast('Это код ячейки, а не товара — сначала отсканируйте товар.', 'error');
+          return;
+        }
         Scanner.beep('ok');
-        Fulfil.toast(`${res.qty} шт «${res.productName}» (${res.clientName}) → ${res.cellAddress}`);
-        renderRow(res, true);
-        resetToProductStage();
-      } catch (err) {
-        Scanner.beep('error');
-        Fulfil.toast(Fulfil.errorText(err), 'error');
-        renderRow(Fulfil.errorText(err), false);
+        scanState.pendingProduct = result.product;
+        const input = document.getElementById('scanInput');
+        const preview = document.getElementById('productPreview');
+        const qtyRow = document.getElementById('qtyRow');
+        const qtyInput = document.getElementById('qtyInput');
+        const hint = document.getElementById('stepHint');
+        document.getElementById('productName').textContent = result.product.name;
+        document.getElementById('productBarcode').textContent = result.product.barcode;
+        preview.style.display = 'flex';
+        qtyRow.style.display = 'flex';
+        qtyInput.value = 1;
+        qtyInput.focus();
+        qtyInput.select();
+        scanState.stage = 'qty';
+        hint.textContent = 'Укажите количество, затем отсканируйте ячейку';
         input.value = '';
-        // ошибка не сбрасывает состояние — можно отсканировать другую ячейку
-      } finally {
-        placing = false;
       }
-    }
 
-    async function handleCode(code) {
-      if (!code) return;
-      if (!Fulfil.clientFilter.clientId) {
-        Scanner.beep('error');
-        Fulfil.toast('Сначала выберите клиента вверху страницы', 'error');
-        return;
+      async function scanHandleCellCode(code) {
+        if (scanState.placing) return;
+        const result = await scanClassify(code);
+        if (!result) return;
+        if (result.kind !== 'cell') {
+          Scanner.beep('error');
+          Fulfil.toast('Это код товара, а не ячейки — отсканируйте ячейку.', 'error');
+          return;
+        }
+        scanState.placing = true;
+        try {
+          const res = await Fulfil.api(
+            'POST', `/receiving/${receiptId}/scan-place`,
+            { productBarcode: scanState.pendingProduct.barcode, cellCode: result.cell.address, qty: scanState.pendingQty },
+            { 'X-Idempotency-Key': Fulfil.newIdempotencyKey() }
+          );
+          Scanner.beep('ok');
+          Fulfil.toast(`${res.qty} шт «${res.productName}» → ${res.cellAddress}`);
+          scanRenderRow(`${res.productName} · ${res.qty} шт · ${res.cellAddress}`, true);
+          scanResetToProductStage();
+          await loadProgress();
+          refreshInProgressUi();
+        } catch (err) {
+          Scanner.beep('error');
+          Fulfil.toast(Fulfil.errorText(err), 'error');
+          scanRenderRow(Fulfil.errorText(err), false);
+          const input = document.getElementById('scanInput');
+          if (input) input.value = '';
+        } finally {
+          scanState.placing = false;
+        }
       }
-      if (stage === 'product') await handleProductCode(code);
-      else await handleCellCode(code);
+
+      async function scanHandleCode(code) {
+        if (!code || mode !== 'scanner') return; // переключились на «Вручную» — сканы игнорируем
+        if (scanState.stage === 'product') await scanHandleProductCode(code);
+        else await scanHandleCellCode(code);
+      }
+
+      function bindScannerPanel() {
+        // Панель пересоздана целиком — визуально она всегда в стадии «скан товара»,
+        // так синхронизируем и логическое состояние (иначе первый скан после
+        // переключения вкладок мог трактоваться как скан ячейки).
+        scanState.stage = 'product';
+        scanState.pendingProduct = null;
+
+        if (!scannerListenerBound) {
+          scannerListenerBound = true;
+          Scanner.onScan((code) => {
+            const input = document.getElementById('scanInput');
+            if (input) input.value = code;
+            scanHandleCode(code.trim());
+          });
+        }
+
+        const input = document.getElementById('scanInput');
+        const qtyInput = document.getElementById('qtyInput');
+        const hint = document.getElementById('stepHint');
+
+        input.addEventListener('keydown', (e) => {
+          if (e.key !== 'Enter') return;
+          const code = input.value.trim();
+          if (!code) return;
+          scanHandleCode(code);
+        });
+        document.getElementById('qtyMinus').addEventListener('click', () => {
+          qtyInput.value = Math.max(1, Number(qtyInput.value) - 1);
+        });
+        document.getElementById('qtyPlus').addEventListener('click', () => {
+          qtyInput.value = Number(qtyInput.value) + 1;
+        });
+        document.getElementById('qtyConfirm').addEventListener('click', () => {
+          scanState.pendingQty = Number(qtyInput.value) || 1;
+          scanState.stage = 'cell';
+          hint.textContent = `Отсканируйте ячейку для ${scanState.pendingQty} шт`;
+          input.focus();
+        });
+      }
+
+      function renderManualPanel() {
+        return `
+          <div class="plan-toolbar">
+            <div style="flex:1 1 220px">
+              <label class="field-label">Ячейка для всей приёмки</label>
+              <input class="input cell-cell-input" id="defaultCell" placeholder="необязательно" />
+            </div>
+            <button class="btn" id="btnAllExpected" style="align-self:flex-end">Всё как заявлено</button>
+            <button class="btn btn-primary" id="btnAcceptManual" style="align-self:flex-end">Провести</button>
+          </div>
+          ${progressTableHtml(true)}`;
+      }
+
+      function bindManualPanel() {
+        document.getElementById('btnAllExpected').addEventListener('click', () => {
+          document.querySelectorAll('[data-role="accept-qty"]').forEach((inp) => {
+            inp.value = inp.dataset.remaining;
+          });
+        });
+        document.getElementById('btnAcceptManual').addEventListener('click', async () => {
+          const defaultCell = document.getElementById('defaultCell').value.trim();
+          const lines = [];
+          document.querySelectorAll('[data-role="accept-qty"]').forEach((inp) => {
+            const qty = Number(inp.value) || 0;
+            if (qty <= 0) return;
+            const productId = Number(inp.dataset.productId);
+            const cellInput = document.querySelector(`[data-role="accept-cell"][data-product-id="${productId}"]`);
+            const cellCode = (cellInput.value.trim() || defaultCell);
+            if (!cellCode) return;
+            lines.push({ productId, qty, cellCode });
+          });
+          if (!lines.length) {
+            Fulfil.toast('Укажите количество и ячейку хотя бы для одной строки', 'error');
+            return;
+          }
+          try {
+            progressData = await Fulfil.api(
+              'POST', `/receiving/${receiptId}/accept-manual`, { lines },
+              { 'X-Idempotency-Key': Fulfil.newIdempotencyKey() }
+            );
+            Fulfil.toast('Приёмка проведена');
+            refreshInProgressUi();
+          } catch (err) {
+            Fulfil.toast(Fulfil.errorText(err), 'error');
+          }
+        });
+      }
+
+      function renderInProgressSection() {
+        return `
+          <div class="section-title">Проведение приёмки</div>
+          <div class="mode-tabs">
+            <button class="mode-btn ${mode === 'scanner' ? 'active' : ''}" data-mode="scanner">Сканер</button>
+            <button class="mode-btn ${mode === 'manual' ? 'active' : ''}" data-mode="manual">Вручную</button>
+          </div>
+          <div id="modeBody">${mode === 'scanner' ? renderScannerPanel() : renderManualPanel()}</div>
+          <div class="toolbar" style="margin-top:10px">
+            <button class="btn btn-primary" id="btnFinish">Завершить приёмку</button>
+          </div>`;
+      }
+
+      async function refreshInProgressUi() {
+        const body = document.getElementById('modeBody');
+        if (!body) return;
+        if (mode === 'manual') await loadCellSuggestions();
+        body.innerHTML = mode === 'scanner' ? renderScannerPanel() : renderManualPanel();
+        if (mode === 'scanner') bindScannerPanel();
+        else bindManualPanel();
+      }
+
+      function bindInProgressSection() {
+        document.querySelectorAll('.mode-btn').forEach((btn) =>
+          btn.addEventListener('click', () => {
+            mode = btn.dataset.mode;
+            document.querySelectorAll('.mode-btn').forEach((b) => b.classList.toggle('active', b === btn));
+            refreshInProgressUi();
+          })
+        );
+        refreshInProgressUi();
+
+        document.getElementById('btnFinish').addEventListener('click', async () => {
+          await loadProgress();
+          const discrepant = progressData.lines.filter((l) => l.diff !== 0);
+          let msg = 'Завершить приёмку?';
+          if (discrepant.length) {
+            msg += ' Есть расхождения: ' + discrepant.map((l) => `${l.productName} (${l.diff > 0 ? '+' : ''}${l.diff})`).join(', ');
+          }
+          if (!confirm(msg)) return;
+          try {
+            receipt = await Fulfil.api('POST', `/receiving/${receiptId}/finish`);
+            renderDetail();
+          } catch (err) {
+            Fulfil.toast(Fulfil.errorText(err), 'error');
+          }
+        });
+      }
+
+      function renderDoneSection() {
+        return `
+          <div class="section-title">Итоги приёмки</div>
+          ${progressTableHtml(false)}
+          <div class="toolbar" style="margin-top:10px">
+            <button class="btn" id="btnReport">Скачать акт расхождений</button>
+          </div>`;
+      }
+
+      function bindDoneSection() {
+        document.getElementById('btnReport').addEventListener('click', async () => {
+          try {
+            await downloadFile(`/receiving/${receiptId}/report.xlsx`, `receipt-${receipt.number}-report.xlsx`);
+          } catch (err) {
+            Fulfil.toast(Fulfil.errorText(err), 'error');
+          }
+        });
+      }
+
+      function historyHtml(rows) {
+        if (!rows.length) return '<div class="empty-state">Пока нет операций</div>';
+        return rows
+          .map(
+            (r) => `
+          <div class="log-item">
+            <span>${Fulfil.esc(r.productName)} · ${r.qty} шт · ${Fulfil.esc(r.cellAddress)}</span>
+            <span style="color:var(--muted)">${fmtDateTime(r.createdAt)}</span>
+          </div>`
+          )
+          .join('');
+      }
+
+      async function renderDetail() {
+        const body = document.getElementById('detailBody');
+        body.innerHTML = renderHead();
+        bindHead();
+
+        if (receipt.status === 'draft') {
+          await loadPlan();
+          body.insertAdjacentHTML('beforeend', renderDraftSection());
+          bindDraftSection();
+        } else if (receipt.status === 'in_progress') {
+          await loadProgress();
+          body.insertAdjacentHTML('beforeend', renderInProgressSection());
+          bindInProgressSection();
+        } else {
+          await loadProgress();
+          body.insertAdjacentHTML('beforeend', renderDoneSection());
+          bindDoneSection();
+        }
+
+        try {
+          const rows = await Fulfil.api('GET', `/receiving/history?receipt_id=${receiptId}&limit=100`);
+          body.insertAdjacentHTML(
+            'beforeend',
+            `<div class="section-title">История операций</div><div class="card" style="padding:18px">${historyHtml(rows)}</div>`
+          );
+        } catch (err) {
+          /* история не критична для карточки */
+        }
+      }
+
+      (async () => {
+        try {
+          await loadReceipt();
+          await renderDetail();
+        } catch (err) {
+          document.getElementById('detailBody').innerHTML = `<div class="empty-state">${Fulfil.esc(Fulfil.errorText(err))}</div>`;
+        }
+      })();
     }
-
-    // Основной путь: сканер, независимо от того, куда сейчас смотрит фокус.
-    Scanner.onScan((code) => {
-      input.value = code;
-      handleCode(code.trim());
-    });
-
-    // Резервный путь: ручной ввод в поле + Enter (для медленного набора, который
-    // Scanner не распознаёт как сканер и не перехватывает).
-    input.addEventListener('keydown', (e) => {
-      if (e.key !== 'Enter') return;
-      const code = input.value.trim();
-      if (!code) return;
-      handleCode(code);
-    });
-
-    document.getElementById('qtyMinus').addEventListener('click', () => {
-      qtyInput.value = Math.max(1, Number(qtyInput.value) - 1);
-    });
-    document.getElementById('qtyPlus').addEventListener('click', () => {
-      qtyInput.value = Number(qtyInput.value) + 1;
-    });
-    document.getElementById('qtyConfirm').addEventListener('click', () => {
-      pendingQty = Number(qtyInput.value) || 1;
-      stage = 'cell';
-      hint.textContent = `Отсканируйте ячейку для ${pendingQty} шт`;
-      input.focus();
-    });
-
-    // История приёмок постоянна — тянется из БД, переживает F5.
-    Fulfil.clientFilter.mount(document.getElementById('clientFilterMount'), () => {
-      refreshClientGate();
-      loadHistory();
-    }).then(() => {
-      refreshClientGate();
-      loadHistory();
-    });
   </script>
 </body>
 </html>
