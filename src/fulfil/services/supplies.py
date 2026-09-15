@@ -14,9 +14,11 @@ from sqlalchemy.orm import Session, selectinload
 
 from fulfil.errors import AppError, WbApiError
 from fulfil.integrations.wb import get_wb_client
-from fulfil.integrations.wb.base import WBClient
+from fulfil.integrations.wb.base import WBClient, parse_wb_datetime
 from fulfil.models.client import Client
 from fulfil.models.fbs import Order, OrderStatus, Supply, SupplyBox, SupplyStatus
+from fulfil.models.integration_state import IntegrationState
+from fulfil.services.clients import list_syncable_clients
 
 logger = logging.getLogger(__name__)
 
@@ -28,14 +30,16 @@ _UNASSEMBLED_ORDER_STATUSES = (OrderStatus.CONFIRMED, OrderStatus.IN_ASSEMBLY)
 # до этого этапа) и явные сбои.
 _OTHER_STATUSES = (SupplyStatus.CLOSED, SupplyStatus.PARTIAL, SupplyStatus.FAILED, SupplyStatus.STALE)
 
+# Кэш "точно не наша" поставка (P1-4) — ключ IntegrationState на клиента, значение
+# {"ids": [...]}. Без него sync_supplies() каждые 5 минут заново дёргал бы
+# GET /supplies/{id}/orders для КАЖДОЙ чужой/исторической поставки продавца — на
+# реальном кабинете это сотни-тысячи запросов за цикл и упор в лимиты WB, из-за
+# которых тормозили бы заказы и стикеры того же клиента.
+_IGNORED_SUPPLIES_KEY_PREFIX = "wb.ignored_supplies"
 
-def _parse_wb_dt(value: str | None) -> dt.datetime | None:
-    if not value:
-        return None
-    try:
-        return dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return None
+
+def _ignored_supplies_key(client_id: int) -> str:
+    return f"{_IGNORED_SUPPLIES_KEY_PREFIX}:{client_id}"
 
 
 def _status_from_wb(done: bool, scan_dt: dt.datetime | None) -> SupplyStatus:
@@ -108,23 +112,28 @@ def close_supply(db: Session, supply: Supply, wb_client: WBClient) -> Supply:
             extra={"orders": [{"id": o.id, "wbOrderId": o.wb_order_id} for o in unassembled]},
         )
 
-    resp = wb_client.close_supply(supply.wb_supply_id)
-    if resp.get("ok"):
-        now = dt.datetime.now(dt.timezone.utc)
-        supply.wb_done = True
-        supply.status = SupplyStatus.IN_DELIVERY
-        supply.closed_at = now
-        supply.closed_at_wb = now
-        packed = list(
-            db.scalars(select(Order).where(Order.supply_id == supply.id, Order.status == OrderStatus.PACKED))
-        )
-        for order in packed:
-            order.status = OrderStatus.SHIPPED
-    else:
-        supply.status = SupplyStatus.FAILED
+    # wb_client.close_supply() либо успевает успешно (WBHttpClient._request принимает
+    # только 2xx), либо бросает WbApiError — она сюда доходит непойманной (P3):
+    # веткa "resp.get('ok') is False -> SupplyStatus.FAILED" была недостижима ни у
+    # HTTP-, ни у мок-клиента, и вводила в заблуждение, будто такой исход возможен.
+    wb_client.close_supply(supply.wb_supply_id)
+    now = dt.datetime.now(dt.timezone.utc)
+    supply.wb_done = True
+    supply.status = SupplyStatus.IN_DELIVERY
+    supply.closed_at = now
+    supply.closed_at_wb = now
+    _ship_packed_orders(db, supply)
     db.commit()
     db.refresh(supply)
     return supply
+
+
+def _ship_packed_orders(db: Session, supply: Supply) -> None:
+    packed = list(
+        db.scalars(select(Order).where(Order.supply_id == supply.id, Order.status == OrderStatus.PACKED))
+    )
+    for order in packed:
+        order.status = OrderStatus.SHIPPED
 
 
 # Статусы, после которых WB отдаёт QR/короба поставки — «закрыто» в новой модели
@@ -186,6 +195,11 @@ def sync_supplies(db: Session, client: Client, wb_client: WBClient) -> dict:
     )
     our_order_ids = set(db.scalars(select(Order.wb_order_id).where(Order.client_id == client.id)))
 
+    ignored_key = _ignored_supplies_key(client.id)
+    ignored_state = db.get(IntegrationState, ignored_key)
+    ignored_ids: set[str] = set((ignored_state.cursor or {}).get("ids", [])) if ignored_state else set()
+    newly_ignored: set[str] = set()
+
     imported = 0
     updated = 0
     cursor: int | None = None
@@ -193,6 +207,8 @@ def sync_supplies(db: Session, client: Client, wb_client: WBClient) -> dict:
         page = wb_client.list_supplies(cursor)
         for s in page.get("supplies", []):
             wb_id = str(s["id"])
+            if wb_id in ignored_ids:
+                continue  # уже проверяли в прошлый раз — не наша (P1-4)
             is_ours = wb_id in known_ids
             if not is_ours:
                 try:
@@ -202,9 +218,10 @@ def sync_supplies(db: Session, client: Client, wb_client: WBClient) -> dict:
                     # 404 "path not found" (проверено на реальном токене —
                     # см. docs/wb-api-contract.md) — WB не даёт заглянуть внутрь
                     # этой конкретной поставки, значит понять, "наша" ли она,
-                    # нечем. Пропускаем именно эту поставку-кандидата, а не
-                    # весь синк: уже известные нам поставки в этом же вызове
-                    # (known_ids) такой проверки не проходят и не страдают.
+                    # нечем. Пропускаем именно эту поставку-кандидата (и НЕ
+                    # запоминаем как игнорируемую — вдруг это временный сбой),
+                    # а не весь синк: уже известные нам поставки в этом же
+                    # вызове (known_ids) такой проверки не проходят и не страдают.
                     logger.debug(
                         "sync_supplies: не удалось прочитать заказы поставки %s клиента %s — пропущена",
                         wb_id, client.id,
@@ -212,6 +229,7 @@ def sync_supplies(db: Session, client: Client, wb_client: WBClient) -> dict:
                     continue
                 is_ours = bool(order_ids & our_order_ids)
             if not is_ours:
+                newly_ignored.add(wb_id)
                 continue
 
             supply = db.scalar(select(Supply).where(Supply.wb_supply_id == wb_id))
@@ -225,17 +243,32 @@ def sync_supplies(db: Session, client: Client, wb_client: WBClient) -> dict:
 
             supply.name = s.get("name") or supply.name
             supply.wb_done = bool(s.get("done"))
-            supply.created_at_wb = _parse_wb_dt(s.get("createdAt"))
-            supply.closed_at_wb = _parse_wb_dt(s.get("closedAt"))
-            supply.scan_dt = _parse_wb_dt(s.get("scanDt"))
+            supply.created_at_wb = parse_wb_datetime(s.get("createdAt"))
+            supply.closed_at_wb = parse_wb_datetime(s.get("closedAt"))
+            supply.scan_dt = parse_wb_datetime(s.get("scanDt"))
             if supply.status not in (SupplyStatus.FAILED, SupplyStatus.STALE):
-                supply.status = _status_from_wb(supply.wb_done, supply.scan_dt)
+                was_open = supply.status == SupplyStatus.OPEN
+                new_status = _status_from_wb(supply.wb_done, supply.scan_dt)
+                if was_open and new_status != SupplyStatus.OPEN:
+                    # Поставку закрыли в личном кабинете WB, минуя close_supply()
+                    # (P1-6) — заказы внутри неё иначе навсегда остались бы PACKED,
+                    # хотя фактически уже отгружены.
+                    _ship_packed_orders(db, supply)
+                supply.status = new_status
 
         cursor = page.get("next")
         if not cursor:
             break
 
+    if newly_ignored:
+        merged = sorted(ignored_ids | newly_ignored)
+        if ignored_state is None:
+            db.add(IntegrationState(key=ignored_key, cursor={"ids": merged}))
+        else:
+            ignored_state.cursor = {"ids": merged}
+
     client.last_sync_at = dt.datetime.now(dt.timezone.utc)
+    client.last_sync_error = None  # P2-13: раньше ошибка предыдущего цикла не очищалась при успехе
     db.commit()
     return {"imported": imported, "updated": updated}
 
@@ -244,17 +277,8 @@ def sync_supplies_all(db: Session) -> list[dict]:
     """По всем активным клиентам со складом (Этап 4, п.4.2) — как
     orders_service.sync_orders: используется и кнопкой «Обновить из WB», и
     фоновым опросом (jobs.py). Ошибка одного клиента не останавливает остальных."""
-    clients = list(
-        db.scalars(
-            select(Client).where(
-                Client.archived_at.is_(None),
-                Client.wb_api_key_enc.is_not(None),
-                Client.wb_warehouse_id.is_not(None),
-            )
-        )
-    )
     results = []
-    for client in clients:
+    for client in list_syncable_clients(db):
         try:
             wb_client = get_wb_client(client)
             stats = sync_supplies(db, client, wb_client)
@@ -277,11 +301,20 @@ _GROUP_STATUSES = {
 }
 
 
-def list_supplies(db: Session, *, client_id: int | None = None, group: str | None = None) -> list[Supply]:
+def list_supplies(
+    db: Session, *, client_id: int | None = None, group: str | None = None,
+    limit: int = 500, offset: int = 0,
+) -> list[Supply]:
+    """limit/offset (P3): раньше грузила ВСЕ поставки клиента со ВСЕМИ их заказами
+    одним запросом — у клиента с большой историей поставок это дорогой запрос и
+    тяжёлая страница на фронте без единого элемента управления, показывающего,
+    что список вообще может быть длиннее одного экрана."""
     stmt = (
         select(Supply)
         .options(selectinload(Supply.client), selectinload(Supply.orders))
         .order_by(Supply.id.desc())
+        .limit(limit)
+        .offset(offset)
     )
     if client_id is not None:
         stmt = stmt.where(Supply.client_id == client_id)

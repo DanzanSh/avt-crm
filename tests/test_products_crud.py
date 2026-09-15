@@ -64,6 +64,10 @@ def test_change_barcode_forbidden_for_wb_linked_product(db, seller):
 
 
 def test_change_barcode_updates_cell_allowed_barcodes(db, seller):
+    """Допуск переносится ДОБАВЛЕНИЕМ новой записи, а не переименованием старой
+    (P3): барcode в cell_allowed_barcodes не привязан к клиенту, и старое значение
+    могло совпадать с товаром другого клиента — переименование задним числом
+    молча меняло бы чужой допуск."""
     from fulfil.models.storage import CellAllowedBarcode
 
     product = create_product(db, client_id=seller.id, barcode="12345678", name="Товар", actor="tester")
@@ -75,8 +79,11 @@ def test_change_barcode_updates_cell_allowed_barcodes(db, seller):
 
     from sqlalchemy import select
 
-    allowed = db.scalar(select(CellAllowedBarcode).where(CellAllowedBarcode.cell_id == cell.id))
-    assert allowed.barcode == "87654321"
+    allowed = {
+        row.barcode
+        for row in db.scalars(select(CellAllowedBarcode).where(CellAllowedBarcode.cell_id == cell.id))
+    }
+    assert allowed == {"12345678", "87654321"}
 
 
 def test_delete_product_with_stock_blocked(db, seller):

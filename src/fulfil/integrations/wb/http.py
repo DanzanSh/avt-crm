@@ -29,6 +29,7 @@ from fulfil.models.wb_log import WbApiLog
 
 _MAX_RETRIES = 3
 _BACKOFF_BASE_SEC = 0.5
+_ORDER_STATUS_BATCH = 1000  # лимит WB на orders/status за один вызов (best-effort)
 
 
 def _wb_hints(client_name: str | None) -> dict:
@@ -109,6 +110,7 @@ def _card_sizes(card: dict) -> list[dict]:
             {
                 "chrtId": size.get("chrtID"),
                 "barcode": skus[0],
+                "extraBarcodes": skus[1:],
                 "size": size.get("techSize", "") or "",
             }
         )
@@ -312,14 +314,21 @@ class WBHttpClient:
                 continue
         if not numeric_ids:
             return {}
-        resp = self._request(
-            "POST", "/api/v3/orders/status", json={"orders": numeric_ids}
-        )
-        data = resp.json()
-        return {
-            str(o.get("id")): {"wbStatus": o.get("wbStatus"), "supplierStatus": o.get("supplierStatus")}
-            for o in data.get("orders", [])
-        }
+
+        # Пачками (P1-9): раньше все незавершённые заказы клиента уходили ОДНИМ
+        # запросом без разбиения — у кабинета с заказами больше лимита WB на этот
+        # метод такой запрос стал бы падать целиком, и опрос статусов у клиента
+        # (а с ним отмены/доставки) остановился бы полностью.
+        result: dict[str, WbOrderStatus] = {}
+        for i in range(0, len(numeric_ids), _ORDER_STATUS_BATCH):
+            chunk = numeric_ids[i : i + _ORDER_STATUS_BATCH]
+            resp = self._request("POST", "/api/v3/orders/status", json={"orders": chunk})
+            data = resp.json()
+            for o in data.get("orders", []):
+                result[str(o.get("id"))] = {
+                    "wbStatus": o.get("wbStatus"), "supplierStatus": o.get("supplierStatus"),
+                }
+        return result
 
     def get_order_sticker(self, order_id: str) -> WbSticker:
         try:

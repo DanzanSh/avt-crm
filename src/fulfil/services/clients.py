@@ -36,6 +36,42 @@ def get_live_client_or_404(db: Session, client_id: int) -> Client:
     return client
 
 
+def list_syncable_clients(db: Session) -> list[Client]:
+    """Живые клиенты с заданным ключом API и складом — единственный набор условий
+    "можно синкать" (P3), раньше скопированный по одному и тому же select()
+    в jobs.py, services/orders.py и services/supplies.py по отдельности."""
+    return list(
+        db.scalars(
+            select(Client).where(
+                Client.archived_at.is_(None),
+                Client.wb_api_key_enc.is_not(None),
+                Client.wb_warehouse_id.is_not(None),
+            )
+        )
+    )
+
+
+def _check_warehouse_change_allowed(db: Session, client: Client) -> None:
+    """Смена склада WB при активных заказах обрывает их синхронизацию (P2-16):
+    sync_orders_from_wb фильтрует заказы строго по client.wb_warehouse_id, поэтому
+    заказы, пришедшие на старый склад, после смены переставали бы находиться."""
+    if not client.wb_warehouse_id:
+        return
+    active_count = db.scalar(
+        select(func.count())
+        .select_from(Order)
+        .where(Order.client_id == client.id, Order.status.in_(_ACTIVE_ORDER_STATUSES))
+    ) or 0
+    if active_count:
+        raise AppError(
+            f'У клиента «{client.name}» есть {active_count} активных заказов ФБС на складе '
+            f'«{client.wb_warehouse_name or client.wb_warehouse_id}» — сначала завершите или '
+            f'отмените их, иначе синхронизация этого склада прекратится.',
+            status_code=409,
+            reason_code="client_has_active_orders",
+        )
+
+
 def _check_name_unique(db: Session, name: str, *, exclude_id: int | None = None) -> None:
     stmt = select(Client).where(Client.name == name, Client.archived_at.is_(None))
     if exclude_id is not None:
@@ -90,6 +126,7 @@ def update_client(
         changes["apiKey"] = {"from": "***", "to": "***"}
 
     if wb_warehouse_id is not None and wb_warehouse_id != client.wb_warehouse_id:
+        _check_warehouse_change_allowed(db, client)
         changes["wbWarehouseId"] = {"from": client.wb_warehouse_id, "to": wb_warehouse_id}
         client.wb_warehouse_id = wb_warehouse_id or None
 
@@ -235,6 +272,7 @@ def create_wb_warehouse(
     name = name.strip()
     if not name:
         raise AppError("Название склада не может быть пустым.", status_code=400, reason_code="invalid_name")
+    _check_warehouse_change_allowed(db, client)
 
     warehouse = wb_client.create_warehouse(name, office_id)
     changes = {
@@ -254,6 +292,7 @@ def set_wb_warehouse(
 ) -> Client:
     """Привязывает УЖЕ существующий в WB склад (выбор из GET .../wb-warehouses) —
     в отличие от create_wb_warehouse, ничего не создаёт на стороне WB."""
+    _check_warehouse_change_allowed(db, client)
     changes = {
         "wbWarehouseId": {"from": client.wb_warehouse_id, "to": warehouse_id},
         "wbWarehouseName": {"from": client.wb_warehouse_name, "to": warehouse_name},

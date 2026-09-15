@@ -14,6 +14,7 @@ place_stock() по-прежнему делегирует запись остат
 import datetime as dt
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 from fulfil.errors import AppError, CellOccupiedError, NotFoundError
@@ -144,22 +145,40 @@ def get_receipt_counters(db: Session, *, client_id: int | None = None) -> dict:
     }
 
 
+_CREATE_RECEIPT_RETRIES = 5
+
+
 def create_receipt(
     db: Session, client: Client, *, expected_date: dt.date | None, comment: str | None, actor: str
 ) -> Receipt:
-    last_id = db.scalar(select(Receipt.id).order_by(Receipt.id.desc())) or 0
-    receipt = Receipt(
-        client_id=client.id,
-        number=f"RCPT-{last_id + 1:06d}",
-        status=ReceiptStatus.DRAFT,
-        expected_date=expected_date,
-        comment=comment,
-        created_by=actor,
+    """Номер — RCPT-{seq}, seq = max(id)+1. Два одновременных запроса могут прочитать
+    один и тот же last_id и попытаться вставить одинаковый number — уникальный индекс
+    ловит гонку через IntegrityError (P2-12): retry с пересчитанным номером вместо
+    необработанного 500."""
+    for _ in range(_CREATE_RECEIPT_RETRIES):
+        last_id = db.scalar(select(Receipt.id).order_by(Receipt.id.desc())) or 0
+        receipt = Receipt(
+            client_id=client.id,
+            number=f"RCPT-{last_id + 1:06d}",
+            status=ReceiptStatus.DRAFT,
+            expected_date=expected_date,
+            comment=comment,
+            created_by=actor,
+        )
+        db.add(receipt)
+        try:
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            continue
+        db.refresh(receipt)
+        return receipt
+
+    raise AppError(
+        "Не удалось создать приёмку — слишком много одновременных попыток, повторите ещё раз.",
+        status_code=409,
+        reason_code="receipt_number_conflict",
     )
-    db.add(receipt)
-    db.commit()
-    db.refresh(receipt)
-    return receipt
 
 
 def update_receipt(
@@ -377,7 +396,11 @@ def place_stock(
     из add_receipt_line зовётся с commit=False, чтобы строка приёмки и движение
     остатка легли одной транзакцией. ref_type/ref_id пробрасываются в apply_move."""
     if qty <= 0:
-        raise ValueError("qty должен быть положительным")
+        # AppError, а не ValueError (P2-10): раньше это было необработанным 500
+        # вместо понятной ошибки — защита на уровне схемы (ScanPlaceRequest.qty,
+        # ManualAcceptLine.qty) тоже добавлена, но вызов сервиса напрямую (не
+        # только через эти две ручки) должен получать тот же внятный конверт.
+        raise AppError("Количество должно быть больше нуля.", status_code=400, reason_code="invalid_qty")
 
     # Блокируем строку ячейки на время проверки+записи — гонка при параллельном
     # размещении в одну и ту же ячейку исключена.

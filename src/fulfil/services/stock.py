@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from fulfil.errors import AppError, CellOccupiedError, StockChangedError, WbApiError
 from fulfil.integrations.wb.base import WBClient
+from fulfil.models.client import Client
 from fulfil.models.fbs import Order, OrderItem, OrderStatus
 from fulfil.models.product import Product
 from fulfil.models.stock import FbsTransfer, FbsTransferStatus, MoveReason, StockByCell, StockMove, new_move_group_id
@@ -144,7 +145,17 @@ def transfer_to_fbs(
             what_to_do="Укажите склад WB в разделе «Клиенты».",
         )
 
-    summary = get_stock_summary(db, product)
+    # Блокируем строку товара на время всей операции — проверка + чтение с WB +
+    # запись на WB — одной транзакцией (P0-3/P1-7). Раньше это не было защищено:
+    # две параллельные передачи (две вкладки, либо "Передать всё" вперемешку с
+    # ручной) обе проходили проверку availableToTransfer по одному и тому же
+    # остатку и обе отправляли своё "before + qty" на WB — итоговое значение на
+    # WB завышалось на величину одной из передач (перепродажа).
+    locked_product = db.execute(
+        select(Product).where(Product.id == product.id).with_for_update()
+    ).scalar_one()
+
+    summary = get_stock_summary(db, locked_product)
     if qty > summary["availableToTransfer"]:
         raise AppError(
             f"Нельзя передать {qty} шт — доступно только {summary['availableToTransfer']}.",
@@ -153,30 +164,29 @@ def transfer_to_fbs(
         )
 
     transfer = FbsTransfer(
-        product_id=product.id,
+        product_id=locked_product.id,
         qty=qty,
         wb_warehouse_id=warehouse_id,
         status=FbsTransferStatus.PENDING,
         idempotency_key=idempotency_key,
     )
     db.add(transfer)
-    db.commit()
-    db.refresh(transfer)
+    db.flush()  # transfer.id нужен ниже, но коммитить рано — иначе снимется блокировка товара
 
     try:
         # WB ЗАДАЁТ остаток на складе (не прибавляет к нему) — читаем, что там
         # сейчас, и отправляем текущее + qty. Раньше здесь отправлялся голый qty,
         # и вторая передача «+3» поверх уже переданных «5» стирала остаток на WB
         # тройкой вместо восьмёрки (Этап 2, п.2.3).
-        before = wb_client.get_fbs_stocks(warehouse_id, [product.barcode]).get(product.barcode, 0)
+        before = wb_client.get_fbs_stocks(warehouse_id, [locked_product.barcode]).get(locked_product.barcode, 0)
         after = before + qty
-        resp = wb_client.set_fbs_stocks(warehouse_id, {product.barcode: after})
+        resp = wb_client.set_fbs_stocks(warehouse_id, {locked_product.barcode: after})
         transfer.wb_amount_before = before
         transfer.wb_amount_after = after
         transfer.wb_response = str(resp)
         if resp.get("ok"):
             transfer.status = FbsTransferStatus.SENT
-            product.wb_fbs_amount = after
+            locked_product.wb_fbs_amount = after
         else:
             transfer.status = FbsTransferStatus.FAILED
     except WbApiError as exc:
@@ -190,6 +200,35 @@ def transfer_to_fbs(
     db.commit()
     db.refresh(transfer)
     return transfer
+
+
+def refresh_wb_fbs_amounts(db: Session, client: Client, wb_client: WBClient) -> int:
+    """Синхронизирует кэш Product.wb_fbs_amount с фактическим остатком на складе WB
+    (P0-3). Раньше это поле обновлялось ТОЛЬКО при transfer_to_fbs — а WB сам
+    уменьшает остаток при каждой продаже, поэтому кэш расходился с реальностью:
+    формула availableToTransfer = total - inOrders - wbFbsAmount вычитала уже
+    проданное дважды (один раз как inOrders, второй раз спрятанным в устаревшем
+    wbFbsAmount), занижая доступное к передаче и рисуя ложный fbsOversold.
+    Вызывается из фонового опроса (jobs.py) по каждому клиенту."""
+    if not client.wb_warehouse_id:
+        return 0
+    products = list(
+        db.scalars(
+            select(Product).where(Product.client_id == client.id, Product.archived_at.is_(None))
+        )
+    )
+    if not products:
+        return 0
+    by_barcode = {p.barcode: p for p in products}
+    amounts = wb_client.get_fbs_stocks(client.wb_warehouse_id, list(by_barcode))
+    updated = 0
+    for barcode, amount in amounts.items():
+        product = by_barcode.get(barcode)
+        if product is not None and product.wb_fbs_amount != amount:
+            product.wb_fbs_amount = amount
+            updated += 1
+    db.commit()
+    return updated
 
 
 def _lock_cell(db: Session, cell: Cell) -> Cell:

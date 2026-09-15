@@ -13,6 +13,7 @@ CRUD с проверкой занятости (FEATURES-PLAN.md, этап 1).
 (см. normalize_homoglyphs).
 """
 
+import datetime as dt
 import re
 
 from sqlalchemy import func, select
@@ -262,9 +263,12 @@ def generate_cells(
     в UI). Аддитивно: существующие места по совпадающему адресу не трогаем."""
     total = racks * shelves_per_rack * cells_per_rack
     if total > MAX_CELLS_PER_GENERATE:
-        raise NotFoundError(
+        # Ошибка ввода, а не "не найдено" (P3) — раньше отдавалась 404.
+        raise AppError(
             f"За один вызов можно создать не больше {MAX_CELLS_PER_GENERATE} мест "
-            f"(запрошено {total})."
+            f"(запрошено {total}).",
+            status_code=400,
+            reason_code="too_many_cells",
         )
 
     zone = get_or_create_zone(db, zone_code)
@@ -317,9 +321,11 @@ def add_racks_to_zone(
     ) or 0
     total = racks * shelves_per_rack * cells_per_rack
     if total > MAX_CELLS_PER_GENERATE:
-        raise NotFoundError(
+        raise AppError(
             f"За один вызов можно создать не больше {MAX_CELLS_PER_GENERATE} мест "
-            f"(запрошено {total})."
+            f"(запрошено {total}).",
+            status_code=400,
+            reason_code="too_many_cells",
         )
 
     created: list[Cell] = []
@@ -391,8 +397,6 @@ def resize_rack(
     prev_cells_count = rack.cells_count
     if cells_to_delete:
         assert_cells_releasable(db, cells_to_delete, what="уменьшить стеллаж")
-    import datetime as dt
-
     now = dt.datetime.now(dt.timezone.utc)
     for c in cells_to_delete:
         c.deleted_at = now
@@ -443,8 +447,6 @@ def resize_shelf(db: Session, shelf: Shelf, target_places_count: int, actor: str
 
     if to_delete_cells:
         assert_cells_releasable(db, to_delete_cells, what="уменьшить полку")
-    import datetime as dt
-
     now = dt.datetime.now(dt.timezone.utc)
     for c in to_delete_cells:
         c.deleted_at = now
@@ -472,8 +474,6 @@ def delete_rack(db: Session, rack: Rack, actor: str) -> None:
         db.scalars(select(Cell).where(Cell.rack_id == rack.id, Cell.deleted_at.is_(None)))
     )
     assert_cells_releasable(db, live_cells, what="удалить стеллаж")
-    import datetime as dt
-
     now = dt.datetime.now(dt.timezone.utc)
     for cell in live_cells:
         cell.deleted_at = now
@@ -489,8 +489,6 @@ def delete_shelf(db: Session, shelf: Shelf, actor: str) -> None:
         db.scalars(select(Cell).where(Cell.shelf_id == shelf.id, Cell.deleted_at.is_(None)))
     )
     assert_cells_releasable(db, live_cells, what="удалить полку")
-    import datetime as dt
-
     now = dt.datetime.now(dt.timezone.utc)
     for cell in live_cells:
         cell.deleted_at = now
@@ -509,8 +507,6 @@ def delete_zone(db: Session, zone: Zone, actor: str) -> None:
         )
     )
     assert_cells_releasable(db, live_cells, what=f"удалить зону {zone.code}")
-    import datetime as dt
-
     now = dt.datetime.now(dt.timezone.utc)
     for cell in live_cells:
         cell.deleted_at = now
@@ -530,8 +526,6 @@ def delete_zone(db: Session, zone: Zone, actor: str) -> None:
 
 def delete_cell(db: Session, cell: Cell, actor: str) -> None:
     assert_cells_releasable(db, [cell], what="удалить ячейку")
-    import datetime as dt
-
     cell.deleted_at = dt.datetime.now(dt.timezone.utc)
     audit.record(db, entity_type="cell", entity_id=cell.id, action="delete", actor=actor)
     db.commit()

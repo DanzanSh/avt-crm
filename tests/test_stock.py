@@ -2,7 +2,12 @@ from fulfil.integrations.wb.mock import WBMockClient
 from fulfil.models.product import Product
 from fulfil.services.receiving import place_stock
 from fulfil.services.storage import generate_cells
-from fulfil.services.stock import get_stock_summary, list_stock_summaries, transfer_to_fbs
+from fulfil.services.stock import (
+    get_stock_summary,
+    list_stock_summaries,
+    refresh_wb_fbs_amounts,
+    transfer_to_fbs,
+)
 
 
 def _make_product(db, seller) -> Product:
@@ -153,3 +158,73 @@ def test_list_stock_summaries_matches_per_product(db, seller):
 
     scoped = list_stock_summaries(db, client_id=seller.id)[product.id]
     assert scoped == single
+
+
+# --- P0-3: кэш wb_fbs_amount должен подтягиваться с WB, не только при передаче ---
+
+
+def test_refresh_wb_fbs_amounts_picks_up_wb_side_sales(db, seller):
+    """WB сам уменьшает остаток при продаже — без периодического опроса кэш
+    Product.wb_fbs_amount расходился бы с реальностью (P0-3): availableToTransfer
+    занижался бы на всё проданное после последней передачи, и появлялся бы ложный
+    fbsOversold."""
+    product = _make_product(db, seller)
+    [cell] = generate_cells(db, "A", racks=1, cells_per_rack=1)
+    wb = WBMockClient()
+    place_stock(db, product, cell, 100)
+    transfer_to_fbs(db, product, 40, idempotency_key="k1", wb_client=wb)
+    db.refresh(product)
+    assert product.wb_fbs_amount == 40
+
+    # WB "продал" 15 штук независимо от нас — на его стороне остаток стал 25,
+    # наш кэш об этом ещё не знает.
+    wb.set_fbs_stocks("WH-1", {product.barcode: 25})
+
+    updated = refresh_wb_fbs_amounts(db, seller, wb)
+    assert updated == 1
+    db.refresh(product)
+    assert product.wb_fbs_amount == 25
+
+    summary = get_stock_summary(db, product)
+    assert summary["wbFbsAmount"] == 25
+    assert summary["fbsOversold"] == 0
+
+
+def test_refresh_wb_fbs_amounts_without_warehouse_is_noop(db, seller):
+    seller.wb_warehouse_id = None
+    db.commit()
+    product = Product(client_id=seller.id, barcode="2000000000024", name="Майка чёрная")
+    db.add(product)
+    db.commit()
+
+    assert refresh_wb_fbs_amounts(db, seller, WBMockClient()) == 0
+
+
+# --- P0-3/P1-7: гонка двух параллельных передач на один и тот же товар ---------
+
+
+def test_transfer_to_fbs_locks_product_row(db, seller):
+    """with_for_update() на товаре — вторая передача видит уже обновлённый остаток,
+    а не тот, что был на момент её собственной проверки (иначе обе передачи могли
+    бы пройти проверку availableToTransfer по одному и тому же исходному значению)."""
+    from sqlalchemy import select as sa_select
+
+    product = _make_product(db, seller)
+    [cell] = generate_cells(db, "A", racks=1, cells_per_rack=1)
+    wb = WBMockClient()
+    place_stock(db, product, cell, 10)
+
+    transfer_to_fbs(db, product, 10, idempotency_key="k1", wb_client=wb)
+    db.refresh(product)
+    assert product.wb_fbs_amount == 10
+
+    # Вся доступная величина уже передана — вторая (независимая) передача должна
+    # быть отклонена, а не молча продавить WB в минус.
+    from fulfil.errors import AppError
+
+    import pytest
+
+    with pytest.raises(AppError) as exc_info:
+        transfer_to_fbs(db, product, 1, idempotency_key="k2", wb_client=wb)
+    assert exc_info.value.reason_code == "not_enough_stock"
+    assert db.scalar(sa_select(Product).where(Product.id == product.id)).wb_fbs_amount == 10

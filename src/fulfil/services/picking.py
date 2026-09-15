@@ -6,7 +6,9 @@
 (см. DEV-PLAN.md: в эталоне фронт и бэк по этому месту расходились).
 """
 
-from sqlalchemy import select
+import datetime as dt
+
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from fulfil.errors import AppError
@@ -26,6 +28,24 @@ def _route_order_query(db: Session, product_id: int):
     )
 
 
+def _reserved_qty_by_cell(db: Session, product_id: int, exclude_order_id: int) -> dict[int, int]:
+    """Кол-во товара по ячейкам, уже распределённое в листы подбора ДРУГИХ заказов,
+    но ещё физически не списанное (picked_at IS NULL) — эти единицы лежат на полке,
+    но уже "обещаны" другому заказу (P0-1). Без вычета этого резерва два заказа на
+    один и тот же остаток получали пересекающиеся аллокации: второй проходил
+    build_pick_list(), а на commit_pick_lines падал в stock_changed."""
+    rows = db.execute(
+        select(PickLine.cell_id, func.sum(PickLine.qty))
+        .where(
+            PickLine.product_id == product_id,
+            PickLine.order_id != exclude_order_id,
+            PickLine.picked_at.is_(None),
+        )
+        .group_by(PickLine.cell_id)
+    ).all()
+    return dict(rows)
+
+
 def build_pick_list(db: Session, order: Order) -> list[PickLine]:
     """Считает распределение по ячейкам для каждой позиции заказа.
     Не списывает остаток — списание происходит при подтверждении сборки (день 11)."""
@@ -38,11 +58,13 @@ def build_pick_list(db: Session, order: Order) -> list[PickLine]:
 
     for item in order.items:
         remaining = item.qty
+        reserved_by_cell = _reserved_qty_by_cell(db, item.product_id, order.id)
         rows = db.execute(_route_order_query(db, item.product_id)).all()
         for stock_row, cell in rows:
             if remaining <= 0:
                 break
-            take = min(remaining, stock_row.qty)
+            free_in_cell = stock_row.qty - reserved_by_cell.get(cell.id, 0)
+            take = min(remaining, free_in_cell)
             if take <= 0:
                 continue
             allocations.append(
@@ -71,6 +93,19 @@ def build_pick_list(db: Session, order: Order) -> list[PickLine]:
     return lines
 
 
+def rebuild_pick_list(db: Session, order: Order) -> list[PickLine]:
+    """Удаляет незавершённый (не списанный) лист подбора заказа и строит новый по
+    актуальному остатку (P0-1). Нужен, когда commit_pick_lines() падает с
+    stock_changed — иначе build_pick_list() из-за своего "if existing: return
+    existing" вечно возвращал бы тот же протухший лист, и заказ навсегда
+    застревал бы на сборке, хотя товар на складе физически есть."""
+    db.execute(
+        delete(PickLine).where(PickLine.order_id == order.id, PickLine.picked_at.is_(None))
+    )
+    db.flush()
+    return build_pick_list(db, order)
+
+
 def commit_pick_lines(db: Session, order: Order, actor: str = "system") -> None:
     """Фактическое списание остатка при подтверждении сборки — та же транзакция,
     что и передача марок в WB (services.marking.confirm_assembly). Списание идёт через
@@ -95,7 +130,4 @@ def commit_pick_lines(db: Session, order: Order, actor: str = "system") -> None:
             db, product=product, cell=cell, qty_delta=-line.qty, reason=MoveReason.PICK,
             actor=actor, ref_type="order", ref_id=order.id,
         )
-
-        import datetime as dt
-
         line.picked_at = dt.datetime.now(dt.timezone.utc)

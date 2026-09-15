@@ -117,9 +117,16 @@
     let allOrders = [];
     let currentPage = 1;
     let pageSize = 20;
+    let lastCounters = {};
+    // Сервер отдаёт максимум ORDERS_PAGE_LIMIT заказов вкладки за раз (P3: раньше
+    // лимит ничем не был ограничен ни на сервере, ни на клиенте) — если вкладка
+    // больше этого, renderPage() покажет предупреждение с точным числом вместо
+    // того, чтобы молча обрезать список.
+    const ORDERS_PAGE_LIMIT = 1000;
 
     function renderTabs(counters) {
       counters = counters || {};
+      lastCounters = counters;
       const el = document.getElementById('tabs');
       el.innerHTML =
         `<button class="tab-all${currentGroup === null ? ' active' : ''}" id="tabAll">Все</button>` +
@@ -168,22 +175,27 @@
         const q = Fulfil.clientFilter.clientId ? `?client_id=${Fulfil.clientFilter.clientId}` : '';
         const counters = await Fulfil.api('GET', '/fbs/orders/counters' + q);
         renderTabs(counters);
+        return counters;
       } catch (err) {
         renderTabs({});
+        return {};
       }
     }
 
     async function load() {
-      loadCounters();
       const body = document.getElementById('body');
       try {
         const params = new URLSearchParams();
         if (Fulfil.clientFilter.clientId) params.set('client_id', Fulfil.clientFilter.clientId);
         if (currentGroup) params.set('group', currentGroup);
         // Лимит с запасом, чтобы получить весь список вкладки за раз — постранично
-        // режем уже на клиенте, как и каталог товаров.
-        params.set('limit', '1000');
-        allOrders = await Fulfil.api('GET', '/fbs/orders?' + params.toString());
+        // режем уже на клиенте, как и каталог товаров. Выше этого renderPage()
+        // предупредит, что показаны не все заказы вкладки (P3).
+        params.set('limit', String(ORDERS_PAGE_LIMIT));
+        [allOrders] = await Promise.all([
+          Fulfil.api('GET', '/fbs/orders?' + params.toString()),
+          loadCounters(),
+        ]);
         currentPage = 1;
         renderPage();
       } catch (err) {
@@ -252,8 +264,12 @@
       updateBulkButton();
 
       paginationBar.hidden = false;
+      const totalInTab = currentGroup ? lastCounters[currentGroup] || 0 : 0;
+      const truncated = allOrders.length >= ORDERS_PAGE_LIMIT && totalInTab > allOrders.length;
       document.getElementById('pageInfo').textContent =
-        `${start + 1}–${Math.min(start + pageSize, allOrders.length)} из ${allOrders.length} (стр. ${currentPage} из ${totalPages})`;
+        `${start + 1}–${Math.min(start + pageSize, allOrders.length)} из ${allOrders.length}` +
+        (truncated ? ` (показаны не все ${totalInTab} — уточните фильтр по клиенту)` : '') +
+        ` (стр. ${currentPage} из ${totalPages})`;
       document.getElementById('btnPrevPage').disabled = currentPage <= 1;
       document.getElementById('btnNextPage').disabled = currentPage >= totalPages;
     }

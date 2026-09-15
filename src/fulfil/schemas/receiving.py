@@ -1,5 +1,7 @@
 import datetime as dt
 
+from pydantic import Field
+
 from fulfil.schemas.common import CamelModel
 
 
@@ -44,7 +46,9 @@ class ImportPlanResultOut(CamelModel):
 
 class ManualAcceptLine(CamelModel):
     product_id: int
-    qty: int
+    # gt=0 (P2-10): qty<=0 доходило до place_stock() и падало необработанным
+    # ValueError-ом (500) вместо понятной ошибки 422 на входе.
+    qty: int = Field(gt=0)
     cell_code: str
 
 
@@ -55,7 +59,7 @@ class AcceptManualRequest(CamelModel):
 class ScanPlaceRequest(CamelModel):
     product_barcode: str
     cell_code: str  # то, что отсканировали: id / CELL-xxx / адрес — сервер сам разберёт
-    qty: int
+    qty: int = Field(gt=0)  # P2-10: см. ManualAcceptLine.qty
 
 
 class ProgressLineOut(CamelModel):

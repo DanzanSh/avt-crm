@@ -36,7 +36,11 @@ _WB_PAYLOAD = {
             ],
             "sizes": [
                 {"chrtID": 111, "techSize": "48", "wbSize": "M", "skus": ["2000000012345"]},
-                {"chrtID": 112, "techSize": "50", "wbSize": "L", "skus": ["2000000012346"]},
+                # два skus одного размера (P2-11) — заказ может прийти с любым из них.
+                {
+                    "chrtID": 112, "techSize": "50", "wbSize": "L",
+                    "skus": ["2000000012346", "2000000099999"],
+                },
             ],
             "photos": [{"big": "https://cdn.wb.ru/big.jpg", "square": "https://cdn.wb.ru/sq.jpg"}],
         },
@@ -63,6 +67,7 @@ def test_get_product_cards_expands_sizes_into_separate_entries(monkeypatch):
     assert first["nmId"] == 100500
     assert first["chrtId"] == 111
     assert first["barcode"] == "2000000012345"
+    assert first["extraBarcodes"] == []
     assert first["size"] == "48"
     assert first["color"] == "чёрный,синий"
     assert first["imageUrl"] == "https://cdn.wb.ru/big.jpg"
@@ -70,6 +75,7 @@ def test_get_product_cards_expands_sizes_into_separate_entries(monkeypatch):
     second = page["cards"][1]
     assert second["chrtId"] == 112
     assert second["barcode"] == "2000000012346"
+    assert second["extraBarcodes"] == ["2000000099999"]
     assert second["size"] == "50"
 
     # cursor.total — число КАРТОЧЕК у WB (3), не число получившихся товаров (2).

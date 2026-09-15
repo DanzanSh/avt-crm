@@ -1,6 +1,6 @@
 import datetime as dt
 
-from fastapi import APIRouter, Depends, Header
+from fastapi import APIRouter, Depends, Header, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
@@ -185,7 +185,7 @@ def move_stock(
     выбирается из списка (тот же сценарий, что на приёмке)."""
     endpoint = "stock.move"
     cached = idempotency.begin_idempotent(db, endpoint, x_idempotency_key)
-    if cached:
+    if cached is not None:
         return cached
 
     product = _get_product(db, product_id)
@@ -208,7 +208,7 @@ def stock_moves(
     reason: str | None = None,
     from_date: dt.datetime | None = None,
     to_date: dt.datetime | None = None,
-    limit: int = 50,
+    limit: int = Query(default=50, ge=1, le=500),  # P3: раньше без верхней границы
     offset: int = 0,
     db: Session = Depends(get_db),
 ) -> list[dict]:

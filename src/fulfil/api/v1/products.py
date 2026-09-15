@@ -131,7 +131,9 @@ def sync_from_wb(client_id: int | None = None, full: bool = False, db: Session =
 
 
 @router.post("/{product_id}/generate-internal-barcode", response_model=ProductOut)
-def generate_internal_barcode(product_id: int, db: Session = Depends(get_db)) -> Product:
+def generate_internal_barcode(
+    product_id: int, db: Session = Depends(get_db), user: dict = Depends(get_current_user)
+) -> Product:
     product = _get_product(db, product_id)
-    products_service.generate_internal_barcode(db, product)
+    products_service.generate_internal_barcode(db, product, actor=_actor(user))
     return product

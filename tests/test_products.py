@@ -21,6 +21,6 @@ def test_generate_internal_barcode_format(db, seller):
     db.commit()
     db.refresh(p)
 
-    code = generate_internal_barcode(db, p)
+    code = generate_internal_barcode(db, p, actor="tester")
     assert code == f"LDX-{p.id:06d}"
     assert p.barcode == code

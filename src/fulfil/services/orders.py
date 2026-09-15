@@ -8,17 +8,22 @@
 
 import datetime as dt
 
-from sqlalchemy import case, func, select
+from sqlalchemy import case, delete, func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 from fulfil.errors import AppError, NotFoundError
 from fulfil.integrations.wb import get_wb_client
-from fulfil.integrations.wb.base import WBClient
+from fulfil.integrations.wb.base import WBClient, parse_wb_datetime
 from fulfil.models.client import Client
-from fulfil.models.fbs import Order, OrderItem, OrderStatus, Supply, SupplyStatus
+from fulfil.models.fbs import Order, OrderItem, OrderStatus, PickLine, Supply, SupplyStatus
 from fulfil.models.product import Product
+from fulfil.models.storage import Cell
+from fulfil.models.stock import MoveReason
 from fulfil.services import supplies as supplies_service
+from fulfil.services.clients import list_syncable_clients
 from fulfil.services.products import sync_products_from_wb
+from fulfil.services.stock_ledger import apply_move
 
 # Заказы, чей исход на WB ещё не известен — опрашиваются статусом отдельно от
 # /orders/new (Этап 3, п.3.1): без этого отмена покупателем, «в доставке» и
@@ -31,6 +36,9 @@ _INCOMPLETE_STATUSES = (
     OrderStatus.IN_SUPPLY,
 )
 _WB_CANCELLED_STATUSES = {"canceled", "canceled_by_client", "declined_by_client"}
+# best-effort (см. предупреждение в шапке integrations/wb/http.py): точное имя
+# терминального статуса "доставлен/выкуплен" не проверено против боевого токена.
+_WB_DELIVERED_STATUSES = {"sold"}
 
 _ARCHIVE_STATUSES = (
     OrderStatus.SHIPPED,
@@ -42,11 +50,23 @@ _ARCHIVE_STATUSES = (
 
 
 def _find_product(db: Session, client: Client, barcode: str) -> Product | None:
-    return db.scalar(
+    product = db.scalar(
         select(Product).where(
             Product.client_id == client.id, Product.barcode == barcode, Product.archived_at.is_(None),
         )
     )
+    if product is not None:
+        return product
+    # WB может отдать любой из нескольких skus одного размера карточки — Product
+    # хранит только один как основной barcode, остальные в extra_barcodes
+    # (P2-11, см. services.products._upsert_card). Без этой проверки заказ по
+    # второму баркоду того же товара навсегда получал бы unknown_sku.
+    for candidate in db.scalars(
+        select(Product).where(Product.client_id == client.id, Product.archived_at.is_(None))
+    ):
+        if barcode in (candidate.extra_barcodes or []):
+            return candidate
+    return None
 
 
 def sync_orders_from_wb(db: Session, client: Client, wb_client: WBClient) -> list[Order]:
@@ -101,13 +121,23 @@ def sync_orders_from_wb(db: Session, client: Client, wb_client: WBClient) -> lis
                 article=wo.get("article"),
                 status=OrderStatus.NEW,
                 problem="unknown_sku" if has_unknown_sku else None,
-                created_at_wb=_parse_wb_dt(wo.get("createdAt")),
-                deadline_at=_parse_wb_dt(wo.get("deadlineAt")),
+                created_at_wb=parse_wb_datetime(wo.get("createdAt")),
+                deadline_at=parse_wb_datetime(wo.get("deadlineAt")),
             )
-            db.add(order)
-            db.flush()
-            for product_id, barcode, qty in resolved_items:
-                db.add(OrderItem(order_id=order.id, product_id=product_id, barcode=barcode, qty=qty))
+            # SAVEPOINT на каждый заказ (P2-12): фоновый опрос и ручная кнопка
+            # «Обновить из WB» могут синкать одновременно и попытаться вставить
+            # один и тот же wb_order_id — уникальный индекс ловит гонку через
+            # IntegrityError. Без begin_nested() rollback() отменил бы ВСЮ пачку
+            # уже обработанных заказов этого вызова, а не только дублирующийся;
+            # так откатывается только этот один заказ, а не 500 на всю синхронизацию.
+            try:
+                with db.begin_nested():
+                    db.add(order)
+                    db.flush()
+                    for product_id, barcode, qty in resolved_items:
+                        db.add(OrderItem(order_id=order.id, product_id=product_id, barcode=barcode, qty=qty))
+            except IntegrityError:
+                continue  # уже создан параллельно — не наша забота в этом вызове
             created.append(order)
     except AppError as exc:
         db.rollback()
@@ -121,6 +151,33 @@ def sync_orders_from_wb(db: Session, client: Client, wb_client: WBClient) -> lis
     for o in created:
         db.refresh(o)
     return created
+
+
+def _release_unpicked_pick_lines(db: Session, order: Order) -> None:
+    """Удаляет ещё не списанные (picked_at IS NULL) строки листа подбора отменённого
+    заказа (P1-5) — иначе они висят навсегда и занимают "резерв" в
+    services.picking._reserved_qty_by_cell, мешая распределению под другие заказы."""
+    db.execute(delete(PickLine).where(PickLine.order_id == order.id, PickLine.picked_at.is_(None)))
+
+
+def _return_cancelled_order_stock(db: Session, order: Order, actor: str) -> None:
+    """Возврат остатка при отмене уже СОБРАННОГО заказа (P1-5): подбор списывает
+    остаток в services.picking.commit_pick_lines (PickLine.picked_at заполняется) —
+    если WB отменяет такой заказ (покупатель отказался после сборки), товар физически
+    остаётся на складе и должен вернуться на тот же остаток, а не потеряться."""
+    picked_lines = db.scalars(
+        select(PickLine).where(PickLine.order_id == order.id, PickLine.picked_at.is_not(None))
+    ).all()
+    for line in picked_lines:
+        product = db.get(Product, line.product_id)
+        cell = db.get(Cell, line.cell_id)
+        if product is None or cell is None:
+            continue
+        apply_move(
+            db, product=product, cell=cell, qty_delta=line.qty, reason=MoveReason.ADJUST,
+            actor=actor, ref_type="order_cancel", ref_id=order.id,
+            comment=f"Возврат остатка: заказ #{order.id} отменён WB после сборки.",
+        )
 
 
 def refresh_order_statuses(db: Session, client: Client, wb_client: WBClient) -> dict:
@@ -149,8 +206,20 @@ def refresh_order_statuses(db: Session, client: Client, wb_client: WBClient) -> 
         order.wb_status = st.get("wbStatus")
         order.supplier_status = st.get("supplierStatus")
         if order.wb_status in _WB_CANCELLED_STATUSES and order.status != OrderStatus.CANCELLED:
+            was_packed = order.status == OrderStatus.PACKED
+            _release_unpicked_pick_lines(db, order)
             order.status = OrderStatus.CANCELLED
+            if was_packed:
+                _return_cancelled_order_stock(db, order, actor="wb-sync")
             cancelled += 1
+        elif (
+            order.wb_status in _WB_DELIVERED_STATUSES
+            and order.status not in (OrderStatus.DELIVERED, OrderStatus.CANCELLED)
+        ):
+            # Жизненный цикл заказа раньше не доходил до конца (P1-6): статус
+            # опрашивался только на отмену, "доставлен" никогда не выставлялся,
+            # и заказ навсегда оставался в SHIPPED/PACKED в архиве.
+            order.status = OrderStatus.DELIVERED
 
     client.last_sync_at = dt.datetime.now(dt.timezone.utc)
     client.last_sync_error = None
@@ -162,17 +231,8 @@ def sync_orders(db: Session) -> list[dict]:
     """Синхронизация заказов по ВСЕМ активным клиентам с заданным ключом API и
     выбранным складом (Этап 3, п.3.1) — используется и кнопкой «Обновить из WB»,
     и фоновым опросом (jobs.py). Ошибка одного клиента не останавливает остальных."""
-    clients = list(
-        db.scalars(
-            select(Client).where(
-                Client.archived_at.is_(None),
-                Client.wb_api_key_enc.is_not(None),
-                Client.wb_warehouse_id.is_not(None),
-            )
-        )
-    )
     results = []
-    for client in clients:
+    for client in list_syncable_clients(db):
         try:
             wb_client = get_wb_client(client)
             created = sync_orders_from_wb(db, client, wb_client)
@@ -186,15 +246,6 @@ def sync_orders(db: Session) -> list[dict]:
                 {"clientId": client.id, "clientName": client.name, "created": 0, "error": exc.detail}
             )
     return results
-
-
-def _parse_wb_dt(value: str | None) -> dt.datetime | None:
-    if not value:
-        return None
-    try:
-        return dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return None
 
 
 def _find_or_create_open_supply(db: Session, client: Client, wb_client: WBClient) -> Supply:
@@ -270,11 +321,21 @@ def list_orders(
     elif group == "assembly":
         stmt = stmt.where(Order.status.in_((OrderStatus.CONFIRMED, OrderStatus.IN_ASSEMBLY)))
     elif group == "packed":
-        stmt = stmt.where(Order.status == OrderStatus.PACKED, Supply.status == SupplyStatus.OPEN)
+        # PACKED без поставки (Order.supply_id IS NULL) — тоже "в сборке" (P2-15):
+        # `Supply.status == OPEN` на NULL supply_id даёт NULL, а не true, и заказ
+        # раньше молча пропадал из обеих вкладок ("Собранные" и "Архив").
+        stmt = stmt.where(
+            Order.status == OrderStatus.PACKED,
+            (Supply.status == SupplyStatus.OPEN) | (Order.supply_id.is_(None)),
+        )
     elif group == "archive":
         stmt = stmt.where(
             Order.status.in_(_ARCHIVE_STATUSES)
-            | ((Order.status == OrderStatus.PACKED) & (Supply.status != SupplyStatus.OPEN))
+            | (
+                (Order.status == OrderStatus.PACKED)
+                & (Order.supply_id.is_not(None))
+                & (Supply.status != SupplyStatus.OPEN)
+            )
         )
     if client_id is not None:
         stmt = stmt.where(Order.client_id == client_id)
@@ -291,7 +352,11 @@ def get_order_counters(db: Session, *, client_id: int | None = None) -> dict:
     group_expr = case(
         (Order.status == OrderStatus.NEW, "new"),
         (Order.status.in_((OrderStatus.CONFIRMED, OrderStatus.IN_ASSEMBLY)), "assembly"),
-        ((Order.status == OrderStatus.PACKED) & (Supply.status == SupplyStatus.OPEN), "packed"),
+        (
+            (Order.status == OrderStatus.PACKED)
+            & ((Supply.status == SupplyStatus.OPEN) | (Order.supply_id.is_(None))),
+            "packed",
+        ),
         else_="archive",
     )
     stmt = select(group_expr.label("grp"), func.count()).select_from(Order).outerjoin(

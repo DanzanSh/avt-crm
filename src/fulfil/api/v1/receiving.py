@@ -1,6 +1,6 @@
 import io
 
-from fastapi import APIRouter, Depends, File, Header, UploadFile
+from fastapi import APIRouter, Depends, File, Header, Query, UploadFile
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
@@ -67,7 +67,8 @@ def template_xlsx(client_id: int, db: Session = Depends(get_db)) -> StreamingRes
 # Объявлено ДО "/{receipt_id}": иначе FastAPI разберёт "history" как receipt_id.
 @router.get("/history", response_model=list[ReceiptLineHistoryOut])
 def history(
-    limit: int = 50, offset: int = 0, client_id: int | None = None, receipt_id: int | None = None,
+    limit: int = Query(default=50, ge=1, le=500),  # P3: раньше без верхней границы
+    offset: int = 0, client_id: int | None = None, receipt_id: int | None = None,
     db: Session = Depends(get_db),
 ) -> list[dict]:
     return receiving_service.list_receipt_lines(
@@ -149,7 +150,7 @@ def scan_place(
     X-Idempotency-Key — повтор с тем же ключом (обрыв сети, двойной скан) не удваивает
     приёмку, а возвращает тот же ответ."""
     cached = idempotency.begin_idempotent(db, _SCAN_ENDPOINT, x_idempotency_key)
-    if cached:
+    if cached is not None:
         return cached
 
     receipt = _get_receipt(db, receipt_id)
@@ -188,7 +189,7 @@ def accept_manual(
     """Пачка строк одной транзакцией — см. services.receiving.accept_manual: если
     строка упала, откатывается вся пачка, ошибка указывает на неё."""
     cached = idempotency.begin_idempotent(db, _ACCEPT_ENDPOINT, x_idempotency_key)
-    if cached:
+    if cached is not None:
         return cached
 
     receipt = _get_receipt(db, receipt_id)

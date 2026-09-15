@@ -41,6 +41,12 @@ class Product(Base):
     # фоновым опросом (Этап 3). Источник правды для «доступно к передаче»
     # вместо ломкого Σ уже отправленных транзакций.
     wb_fbs_amount: Mapped[int] = mapped_column(default=0, server_default="0")
+    # Доп. баркоды того же размера карточки WB (skus[1:] — P2-11): у части
+    # размеров WB отдаёт больше одного skus для одного и того же chrtId, и заказ
+    # может прийти с любым из них. Не хранится в поле barcode (оно одно и
+    # уникально в пределах клиента) — только для поиска товара по позиции заказа
+    # (см. services.orders._find_product).
+    extra_barcodes: Mapped[list[str]] = mapped_column(JSON, default=list)
     synced_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()

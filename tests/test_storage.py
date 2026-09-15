@@ -90,8 +90,13 @@ def test_generate_cells_is_additive_not_duplicating(db, seller):
 
 
 def test_generate_cells_enforces_limit(db, seller):
-    with pytest.raises(NotFoundError):
+    """Превышение лимита — ошибка ввода (400), а не "не найдено" (P3)."""
+    from fulfil.errors import AppError
+
+    with pytest.raises(AppError) as exc_info:
         generate_cells(db, "A", racks=10, cells_per_rack=MAX_CELLS_PER_GENERATE)
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.reason_code == "too_many_cells"
 
 
 def test_generate_cells_rejects_cyrillic_zone(db, seller):

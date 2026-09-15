@@ -54,9 +54,40 @@ def _validate_any_barcode(barcode: str) -> bool:
     return validate_gtin(barcode) or bool(_INTERNAL_BARCODE_RE.match(barcode))
 
 
-def generate_internal_barcode(db: Session, product: Product, prefix: str = "LDX") -> str:
+def generate_internal_barcode(db: Session, product: Product, actor: str, prefix: str = "LDX") -> str:
+    """Генерирует внутренний ШК для товара без баркода WB (P3): раньше не проверяла
+    ни привязку к карточке WB, ни уникальность результата в каталоге клиента, и не
+    писала факт правки в аудит — в отличие от остальных изменений баркода
+    (_change_barcode)."""
+    if product.wb_nm_id is not None:
+        raise AppError(
+            "Нельзя сгенерировать внутренний ШК — товар привязан к карточке WB, источник правды там.",
+            status_code=400,
+            reason_code="barcode_locked_by_wb",
+        )
     code = f"{prefix}-{product.id:06d}"
+    clash = db.scalar(
+        select(Product).where(
+            Product.client_id == product.client_id, Product.barcode == code,
+            Product.archived_at.is_(None), Product.id != product.id,
+        )
+    )
+    if clash is not None:
+        raise AppError(
+            f'Баркод «{code}» уже используется другим товаром этого клиента.',
+            status_code=409,
+            reason_code="barcode_exists",
+        )
+
+    old_barcode = product.barcode
     product.barcode = code
+    manual = set(product.manual_fields or [])
+    manual.add("barcode")
+    product.manual_fields = sorted(manual)
+    audit.record(
+        db, entity_type="product", entity_id=product.id, action="update", actor=actor,
+        changes={"barcode": {"from": old_barcode, "to": code}},
+    )
     db.commit()
     return code
 
@@ -102,6 +133,29 @@ def _upsert_card(db: Session, client: Client, card: dict) -> bool:
         if field in manual:
             continue  # изменено вручную — синк не перезаписывает (Scope IN п.4)
         setattr(product, field, value)
+
+    # Баркод карточки WB мог перевыпуститься (Этап P2-11): товар найден по
+    # chrt_id/старому баркоду, но если WB теперь отдаёт другое значение и баркод
+    # не правился вручную, подхватываем актуальное — иначе заказы по новому
+    # баркоду навсегда получали бы problem='unknown_sku', хотя товар в каталоге
+    # есть, просто под другим значением barcode. Не переносим, если баркод уже
+    # занят другим живым товаром этого клиента (редкая коллизия данных WB) —
+    # тогда лучше не трогать, чем упасть на INSERT/UPDATE constraint.
+    if barcode and "barcode" not in manual and barcode != product.barcode:
+        clash = db.scalar(
+            select(Product).where(
+                Product.client_id == client.id, Product.barcode == barcode,
+                Product.archived_at.is_(None), Product.id != product.id,
+            )
+        )
+        if clash is None:
+            product.barcode = barcode
+
+    if "barcode" not in manual:
+        # Доп. skus того же размера (P2-11) — иначе заказ по второму баркоду
+        # размера навсегда получал бы problem='unknown_sku', хотя товар в
+        # каталоге есть под этим же chrtId, просто под другим значением barcode.
+        product.extra_barcodes = [b for b in (card.get("extraBarcodes") or []) if b != product.barcode]
 
     product.wb_nm_id = card.get("nmId")
     product.wb_imt_id = card.get("imtId")
@@ -273,8 +327,22 @@ def _change_barcode(db: Session, product: Product, new_barcode: str) -> tuple[st
 
     old_barcode = product.barcode
     product.barcode = new_barcode
-    for allowed in db.scalars(select(CellAllowedBarcode).where(CellAllowedBarcode.barcode == old_barcode)):
-        allowed.barcode = new_barcode
+    # Допуски переносим ДОБАВЛЕНИЕМ новой записи, а не переименованием старой
+    # (P3): cell_allowed_barcodes.barcode — голая строка без привязки к клиенту,
+    # баркоды уникальны только В ПРЕДЕЛАХ клиента, значит тот же старый баркод
+    # мог совпасть с товаром ДРУГОГО клиента. Переименование строки задним числом
+    # молча меняло бы чужой допуск; добавление новой записи ничего не отбирает.
+    cell_ids = set(
+        db.scalars(select(CellAllowedBarcode.cell_id).where(CellAllowedBarcode.barcode == old_barcode))
+    )
+    for cell_id in cell_ids:
+        exists = db.scalar(
+            select(CellAllowedBarcode).where(
+                CellAllowedBarcode.cell_id == cell_id, CellAllowedBarcode.barcode == new_barcode,
+            )
+        )
+        if exists is None:
+            db.add(CellAllowedBarcode(cell_id=cell_id, barcode=new_barcode))
     return old_barcode, new_barcode
 
 

@@ -80,6 +80,40 @@ def test_sync_orders_unknown_sku_sets_problem_and_resyncs_cards(db, seller):
     assert unknown.items[0].barcode == "9999999999999"  # позиция сохранена, а не потеряна
 
 
+def test_sync_orders_resolves_second_sku_of_same_size(db, seller):
+    """WB может отдать больше одного sku для одного размера карточки (P2-11) —
+    заказ, пришедший со вторым sku, должен находить тот же товар через
+    Product.extra_barcodes, а не получать problem='unknown_sku'."""
+    _with_warehouse(seller)
+    db.commit()
+    primary_barcode = f"20000{seller.id:03d}0017"
+    extra_barcode = f"20000{seller.id:03d}0099"
+
+    class _TwoSkusClient(WBMockClient):
+        def get_product_cards(self, cursor=None):
+            page = super().get_product_cards(cursor)
+            if not cursor:
+                page["cards"][0]["extraBarcodes"] = [extra_barcode]
+            return page
+
+    wb = _TwoSkusClient(client_id=seller.id)
+    wb._pending_orders = []  # без дефолтного заказа по первому баркоду
+    wb.add_order(items=[{"barcode": extra_barcode, "qty": 1}])
+
+    created = sync_orders_from_wb(db, seller, wb)
+
+    assert len(created) == 1
+    assert created[0].problem is None
+    assert created[0].items[0].product_id is not None
+    assert created[0].items[0].barcode == extra_barcode
+
+    from fulfil.models.product import Product
+
+    product = db.get(Product, created[0].items[0].product_id)
+    assert product.barcode == primary_barcode
+    assert product.extra_barcodes == [extra_barcode]
+
+
 def test_sync_orders_records_error_and_rolls_back_batch(db, seller):
     """Сбой WB API среди заказов откатывает всю пачку этого вызова (как и было —
     один commit на весь sync_orders_from_wb) и пишет причину в last_sync_error,
@@ -149,6 +183,100 @@ def test_refresh_order_statuses_ignores_completed_orders(db, seller):
 
     result = refresh_order_statuses(db, seller, WBMockClient(client_id=seller.id))
     assert result == {"checked": 0, "cancelled": 0}
+
+
+def test_refresh_order_statuses_sets_delivered(db, seller):
+    """Жизненный цикл раньше не доходил до конца (P1-6): статус опрашивался
+    только на отмену, "доставлен" никогда не выставлялся."""
+    order = Order(client_id=seller.id, wb_order_id="SOLD-1", status=OrderStatus.PACKED)
+    db.add(order)
+    db.commit()
+
+    wb = WBMockClient(client_id=seller.id)
+    wb._order_statuses["SOLD-1"] = {"wbStatus": "sold", "supplierStatus": "sold"}
+
+    result = refresh_order_statuses(db, seller, wb)
+    db.refresh(order)
+    assert order.status == OrderStatus.DELIVERED
+    assert result == {"checked": 1, "cancelled": 0}
+
+
+def test_refresh_order_statuses_cancel_after_packed_returns_stock(db, seller):
+    """Покупатель отменил заказ ПОСЛЕ сборки — остаток уже списан
+    commit_pick_lines(), при отмене он должен вернуться на ту же ячейку (P1-5)."""
+    from fulfil.models.fbs import OrderItem, PickLine
+    from fulfil.models.product import Product
+    from fulfil.models.stock import StockByCell
+    from fulfil.services.picking import build_pick_list, commit_pick_lines
+    from fulfil.services.receiving import place_stock
+    from fulfil.services.storage import generate_cells
+
+    _with_warehouse(seller)
+    product = Product(client_id=seller.id, barcode="2000000000048", name="Товар")
+    db.add(product)
+    db.flush()
+    [cell] = generate_cells(db, "A", racks=1, cells_per_rack=1)
+    place_stock(db, product, cell, 10)
+
+    order = Order(client_id=seller.id, wb_order_id="PACKED-CANCEL", status=OrderStatus.CONFIRMED)
+    db.add(order)
+    db.flush()
+    db.add(OrderItem(order_id=order.id, product_id=product.id, barcode=product.barcode, qty=4))
+    db.commit()
+    db.refresh(order)
+
+    build_pick_list(db, order)
+    commit_pick_lines(db, order)
+    order.status = OrderStatus.PACKED
+    db.commit()
+
+    row = db.scalar(select(StockByCell).where(StockByCell.product_id == product.id))
+    assert row.qty == 6  # 10 - 4 списано подбором
+
+    wb = WBMockClient(client_id=seller.id)
+    wb.cancel_order("PACKED-CANCEL")
+    refresh_order_statuses(db, seller, wb)
+
+    db.refresh(order)
+    assert order.status == OrderStatus.CANCELLED
+    row = db.scalar(select(StockByCell).where(StockByCell.product_id == product.id))
+    assert row.qty == 10  # возвращено обратно
+
+    remaining_lines = db.scalars(select(PickLine).where(PickLine.order_id == order.id)).all()
+    assert all(line.picked_at is not None for line in remaining_lines)  # списанные строки не трогаем
+
+
+def test_refresh_order_statuses_cancel_before_packing_releases_pick_lines(db, seller):
+    """Отмена ДО сборки (заказ ещё CONFIRMED, лист подбора уже построен, но не
+    списан) — незавершённые строки листа должны быть удалены (P1-5), иначе они
+    висят и блокируют резерв под другие заказы."""
+    from fulfil.models.fbs import OrderItem, PickLine
+    from fulfil.models.product import Product
+    from fulfil.services.picking import build_pick_list
+    from fulfil.services.receiving import place_stock
+    from fulfil.services.storage import generate_cells
+
+    _with_warehouse(seller)
+    product = Product(client_id=seller.id, barcode="2000000000055", name="Товар")
+    db.add(product)
+    db.flush()
+    [cell] = generate_cells(db, "A", racks=1, cells_per_rack=1)
+    place_stock(db, product, cell, 10)
+
+    order = Order(client_id=seller.id, wb_order_id="PRE-CANCEL", status=OrderStatus.CONFIRMED)
+    db.add(order)
+    db.flush()
+    db.add(OrderItem(order_id=order.id, product_id=product.id, barcode=product.barcode, qty=4))
+    db.commit()
+    db.refresh(order)
+
+    build_pick_list(db, order)  # бронирует, но не списывает
+
+    wb = WBMockClient(client_id=seller.id)
+    wb.cancel_order("PRE-CANCEL")
+    refresh_order_statuses(db, seller, wb)
+
+    assert db.scalars(select(PickLine).where(PickLine.order_id == order.id)).all() == []
 
 
 # --- «Взять в работу»: подтверждение через поставку -------------------------
@@ -260,6 +388,37 @@ def test_order_counters_and_group_filters(db, seller):
     assert {o.wb_order_id for o in list_orders(db, client_id=seller.id, group="archive")} == {"C-5", "C-6"}
 
 
+def test_list_supplies_paginates(db, seller):
+    """limit/offset (P3): раньше list_supplies грузила всё без ограничения."""
+    for i in range(5):
+        db.add(Supply(client_id=seller.id, status=SupplyStatus.OPEN))
+    db.commit()
+
+    page1 = list_supplies(db, client_id=seller.id, limit=2, offset=0)
+    page2 = list_supplies(db, client_id=seller.id, limit=2, offset=2)
+
+    assert len(page1) == 2
+    assert len(page2) == 2
+    assert {s.id for s in page1}.isdisjoint({s.id for s in page2})
+    # Порядок стабилен (id desc) — постранично не должно терять/дублировать записи.
+    assert list_supplies(db, client_id=seller.id, limit=100)[:2] == page1
+
+
+def test_packed_order_without_supply_counts_as_packed_not_archive(db, seller):
+    """PACKED без supply_id (Order.supply_id IS NULL) раньше пропадал из обеих
+    вкладок — `Supply.status == OPEN` на NULL supply_id даёт NULL, не true (P2-15)."""
+    packed_no_supply = Order(client_id=seller.id, wb_order_id="C-7", status=OrderStatus.PACKED, supply_id=None)
+    db.add(packed_no_supply)
+    db.commit()
+
+    counters = get_order_counters(db, client_id=seller.id)
+    assert counters["packed"] == 1
+    assert counters["new"] == counters["assembly"] == counters["problems"] == 0
+
+    assert {o.wb_order_id for o in list_orders(db, client_id=seller.id, group="packed")} == {"C-7"}
+    assert list_orders(db, client_id=seller.id, group="archive") == []
+
+
 # --- Поставки: статус выводится из done/scanDt (Этап 4, п.6 problems.txt) ----
 
 
@@ -369,6 +528,48 @@ def test_sync_supplies_ignores_foreign_supply_without_our_orders(db, seller):
 
     assert result["imported"] == 0
     assert db.scalar(select(Supply).where(Supply.wb_supply_id == foreign_supply_id)) is None
+
+
+def test_sync_supplies_does_not_reask_ignored_foreign_supply(db, seller):
+    """P1-4: поставка, однажды опознанная как "не наша", не должна снова
+    запрашивать GET .../{id}/orders на следующих циклах — иначе каждый проход
+    фонового опроса заново дёргает WB по всем чужим/историческим поставкам
+    продавца и упирается в лимиты."""
+    calls = {"n": 0}
+
+    class _CountingClient(WBMockClient):
+        def get_supply_orders(self, supply_id):
+            calls["n"] += 1
+            return super().get_supply_orders(supply_id)
+
+    wb = _CountingClient(client_id=seller.id)
+    foreign_supply_id = wb.create_supply("Совсем чужая")
+    wb.add_order_to_supply(foreign_supply_id, "NOT-OUR-ORDER")
+
+    sync_supplies(db, seller, wb)
+    assert calls["n"] == 1
+
+    sync_supplies(db, seller, wb)
+    assert calls["n"] == 1  # не спросили снова
+
+
+def test_sync_supplies_ships_packed_orders_when_closed_outside_fulfil(db, seller):
+    """Поставку закрыли в личном кабинете WB, минуя close_supply() — заказы
+    внутри неё должны перейти в SHIPPED при следующем sync_supplies() (P1-6),
+    иначе они навсегда остаются PACKED."""
+    wb = WBMockClient(client_id=seller.id)
+    supply = create_supply(db, seller, wb)
+    packed = Order(client_id=seller.id, wb_order_id="OUTSIDE-CLOSE-1", status=OrderStatus.PACKED, supply_id=supply.id)
+    db.add(packed)
+    db.commit()
+
+    wb.close_supply(supply.wb_supply_id)  # done=True напрямую на стороне WB
+    sync_supplies(db, seller, wb)
+
+    db.refresh(packed)
+    assert packed.status == OrderStatus.SHIPPED
+    db.refresh(supply)
+    assert supply.status == SupplyStatus.IN_DELIVERY
 
 
 def test_sync_supplies_skips_supply_when_orders_endpoint_404s(db, seller):

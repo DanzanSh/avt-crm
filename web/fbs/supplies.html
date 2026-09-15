@@ -86,13 +86,21 @@
       );
     }
 
+    // Лимит с запасом (P3: раньше запрос вообще не ограничивался и грузил всю
+    // историю поставок клиента со всеми их заказами). Если вкладка больше этого —
+    // показываем предупреждение с точным числом (из /supplies/counters) вместо
+    // того, чтобы молча обрезать список без объяснения.
+    const SUPPLIES_PAGE_LIMIT = 500;
+
     async function loadCounters() {
       try {
         const q = Fulfil.clientFilter.clientId ? `?client_id=${Fulfil.clientFilter.clientId}` : '';
         const counters = await Fulfil.api('GET', '/fbs/supplies/counters' + q);
         renderTabs(counters);
+        return counters;
       } catch (err) {
         renderTabs({});
+        return {};
       }
     }
 
@@ -102,18 +110,28 @@
     }
 
     async function load() {
-      loadCounters();
       const list = document.getElementById('list');
       try {
         const params = new URLSearchParams();
         if (Fulfil.clientFilter.clientId) params.set('client_id', Fulfil.clientFilter.clientId);
         if (currentGroup) params.set('group', currentGroup);
-        const supplies = await Fulfil.api('GET', '/fbs/supplies?' + params.toString());
+        params.set('limit', String(SUPPLIES_PAGE_LIMIT));
+        const [supplies, counters] = await Promise.all([
+          Fulfil.api('GET', '/fbs/supplies?' + params.toString()),
+          loadCounters(),
+        ]);
         if (!supplies.length) {
           list.innerHTML = '<div class="empty-state">Поставок в этой вкладке нет</div>';
           return;
         }
-        list.innerHTML = supplies
+        const totalInTab = counters[currentGroup] || 0;
+        const truncatedNotice =
+          supplies.length >= SUPPLIES_PAGE_LIMIT && totalInTab > supplies.length
+            ? `<div class="list-card" style="color: var(--text-2);">
+                Показаны первые ${supplies.length} из ${totalInTab} — уточните фильтр по клиенту, чтобы увидеть остальные.
+              </div>`
+            : '';
+        list.innerHTML = truncatedNotice + supplies
           .map((s) => {
             const [label, cls] = STATUS_LABELS[s.status] || [s.status, 'badge-muted'];
             const canClose = s.status === 'open';

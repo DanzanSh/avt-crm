@@ -1,5 +1,7 @@
 import datetime as dt
 
+from pydantic import Field
+
 from fulfil.schemas.common import CamelModel
 
 
@@ -64,7 +66,7 @@ class PickLineOut(CamelModel):
 
 
 class CreateBoxesRequest(CamelModel):
-    amount: int
+    amount: int = Field(gt=0, le=100)  # P2-10: не ограничивалось ничем
 
 
 class CreateSupplyRequest(CamelModel):

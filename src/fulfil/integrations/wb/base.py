@@ -5,7 +5,19 @@
 (риск №1 бизнес-плана), поэтому бизнес-логика не должна зависеть от реальной сети.
 """
 
+import datetime as dt
 from typing import Protocol, TypedDict
+
+
+def parse_wb_datetime(value: str | None) -> dt.datetime | None:
+    """ISO-8601 с 'Z' вместо смещения — формат дат в ответах WB. Общий парсер (P3):
+    раньше был продублирован как `_parse_wb_dt` в services/orders.py и services/supplies.py."""
+    if not value:
+        return None
+    try:
+        return dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 
 class WbProductCard(TypedDict):
@@ -14,6 +26,7 @@ class WbProductCard(TypedDict):
     chrtId: int | None  # id размера карточки — Этап 1: товар = размер, а не карточка целиком
     vendorCode: str
     barcode: str
+    extraBarcodes: list[str]  # skus[1:] того же размера (P2-11) — см. Product.extra_barcodes
     name: str
     brand: str
     size: str

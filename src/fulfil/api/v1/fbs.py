@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -59,7 +59,9 @@ def sync_orders(client_id: int | None = None, db: Session = Depends(get_db)) -> 
 @router.get("/orders", response_model=list[OrderOut])
 def list_orders(
     client_id: int | None = None, warehouse_id: str | None = None, group: str | None = None,
-    limit: int = 100, offset: int = 0, db: Session = Depends(get_db),
+    limit: int = Query(default=100, ge=1, le=1000),  # P3: раньше без верхней границы
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
 ) -> list[Order]:
     return orders_service.list_orders(
         db, client_id=client_id, warehouse_id=warehouse_id, group=group, limit=limit, offset=offset,
@@ -173,9 +175,12 @@ def sync_supplies(client_id: int | None = None, db: Session = Depends(get_db)) -
 
 @router.get("/supplies", response_model=list[SupplyOut])
 def list_supplies(
-    client_id: int | None = None, group: str | None = None, db: Session = Depends(get_db)
+    client_id: int | None = None, group: str | None = None,
+    limit: int = Query(default=500, ge=1, le=1000),  # P3: раньше без верхней границы
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
 ) -> list[Supply]:
-    return supplies_service.list_supplies(db, client_id=client_id, group=group)
+    return supplies_service.list_supplies(db, client_id=client_id, group=group, limit=limit, offset=offset)
 
 
 @router.get("/supplies/counters", response_model=SupplyCountersOut)

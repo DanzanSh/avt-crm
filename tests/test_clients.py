@@ -229,3 +229,58 @@ def test_list_wb_offices_and_warehouses_delegate_to_wb_client(db, seller):
     warehouses = clients_service.list_wb_warehouses(wb)
     assert len(warehouses) == 1
     assert warehouses[0]["name"] == "Мой склад"
+
+
+# --- P2-16: смена склада WB при активных заказах ------------------------------
+
+
+def _make_active_order(db, client, wb_order_id="ACT-1"):
+    from fulfil.models.fbs import Order, OrderStatus
+
+    order = Order(client_id=client.id, wb_order_id=wb_order_id, status=OrderStatus.CONFIRMED)
+    db.add(order)
+    db.commit()
+    return order
+
+
+def test_update_client_blocks_warehouse_change_with_active_orders(db, seller):
+    seller.wb_warehouse_id = "WH-OLD"
+    db.commit()
+    _make_active_order(db, seller)
+
+    with pytest.raises(AppError) as exc_info:
+        clients_service.update_client(db, seller, wb_warehouse_id="WH-NEW", actor="tester")
+    assert exc_info.value.reason_code == "client_has_active_orders"
+    db.refresh(seller)
+    assert seller.wb_warehouse_id == "WH-OLD"  # не поменялось
+
+
+def test_update_client_allows_warehouse_change_without_active_orders(db, seller):
+    seller.wb_warehouse_id = "WH-OLD"
+    db.commit()
+
+    updated = clients_service.update_client(db, seller, wb_warehouse_id="WH-NEW", actor="tester")
+    assert updated.wb_warehouse_id == "WH-NEW"
+
+
+def test_set_wb_warehouse_blocks_change_with_active_orders(db, seller):
+    seller.wb_warehouse_id = "WH-OLD"
+    db.commit()
+    _make_active_order(db, seller)
+
+    with pytest.raises(AppError) as exc_info:
+        clients_service.set_wb_warehouse(
+            db, seller, warehouse_id="WH-NEW", warehouse_name="Новый склад", actor="tester",
+        )
+    assert exc_info.value.reason_code == "client_has_active_orders"
+
+
+def test_create_wb_warehouse_blocks_change_with_active_orders(db, seller):
+    seller.wb_warehouse_id = "WH-OLD"
+    db.commit()
+    _make_active_order(db, seller)
+    wb = WBMockClient(client_id=seller.id)
+
+    with pytest.raises(AppError) as exc_info:
+        clients_service.create_wb_warehouse(db, seller, wb, name="Новый склад", office_id=1, actor="tester")
+    assert exc_info.value.reason_code == "client_has_active_orders"
