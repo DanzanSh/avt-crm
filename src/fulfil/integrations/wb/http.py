@@ -22,6 +22,7 @@ from fulfil.integrations.wb.base import (
     WbOrder,
     WbOrderStatus,
     WbSticker,
+    WbSuppliesPage,
     WbWarehouse,
 )
 from fulfil.models.wb_log import WbApiLog
@@ -353,6 +354,30 @@ class WBHttpClient:
     def close_supply(self, supply_id: str) -> dict:
         resp = self._request("PATCH", f"/api/v3/supplies/{supply_id}/deliver")
         return {"ok": resp.status_code < 300, "status": "closed"}
+
+    def list_supplies(self, next_cursor: int | None = None, limit: int = 1000) -> WbSuppliesPage:
+        params: dict = {"limit": limit}
+        if next_cursor:
+            params["next"] = next_cursor
+        resp = self._request("GET", "/api/v3/supplies", params=params)
+        data = resp.json()
+        supplies = [
+            {
+                "id": str(s.get("id")),
+                "name": s.get("name"),
+                "done": bool(s.get("done")),
+                "createdAt": s.get("createdAt"),
+                "closedAt": s.get("closedAt"),
+                "scanDt": s.get("scanDt"),
+            }
+            for s in data.get("supplies", [])
+        ]
+        return {"supplies": supplies, "next": data.get("next") or None}
+
+    def get_supply_orders(self, supply_id: str) -> list[str]:
+        resp = self._request("GET", f"/api/v3/supplies/{supply_id}/orders")
+        data = resp.json()
+        return [str(o.get("id")) for o in data.get("orders", [])]
 
     def get_supply_qr(self, supply_id: str) -> WbSticker:
         resp = self._request(

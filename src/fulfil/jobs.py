@@ -1,9 +1,11 @@
-"""Фоновый опрос WB: заказы и их статусы по каждому клиенту (Этап 3 плана №3, п.3.1).
+"""Фоновый опрос WB: заказы, их статусы и поставки по каждому клиенту (Этап 3
+плана №3, п.3.1; поставки — Этап 4, п.4.2).
 
 Статусы уже загруженных заказов раньше не обновлялись — опрашивался только
 GET /orders/new, поэтому отмена покупателем и «в доставке»/«принята» до нас
 не доходили. Здесь этот опрос выполняется по расписанию, а не только по клику
-«Обновить из WB».
+«Обновить из WB». То же самое для поставок: без периодического sync_supplies()
+статус «Принята» (scanDt) узнаётся только по ручному клику на странице.
 
 uvicorn в этом проекте работает в одном процессе (см. Dockerfile) — фоновый
 поток и process-local Event достаточны. При масштабировании на несколько
@@ -22,6 +24,7 @@ from fulfil.errors import AppError
 from fulfil.integrations.wb import get_wb_client
 from fulfil.models.client import Client
 from fulfil.services.orders import refresh_order_statuses, sync_orders_from_wb
+from fulfil.services.supplies import sync_supplies
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +51,9 @@ def run_sync_cycle() -> None:
                 wb_client = get_wb_client(client)
                 sync_orders_from_wb(db, client, wb_client)
                 refresh_order_statuses(db, client, wb_client)
+                # Поставки (Этап 4, п.4.2) — на статус того же клиента заодно,
+                # чтобы отмена/приёмка на стороне WB долетала без ручного клика.
+                sync_supplies(db, client, wb_client)
             except AppError:
                 # sync_orders_from_wb/refresh_order_statuses уже записали текст
                 # причины в client.last_sync_error и закоммитили — здесь только

@@ -16,6 +16,7 @@
 add_order()/cancel_order() — тестовые хуки, а не часть протокола WBClient."""
 
 import base64
+import datetime as dt
 import uuid
 
 from fulfil.integrations.wb.base import (
@@ -25,6 +26,7 @@ from fulfil.integrations.wb.base import (
     WbOrder,
     WbOrderStatus,
     WbSticker,
+    WbSuppliesPage,
     WbWarehouse,
 )
 
@@ -174,20 +176,63 @@ class WBMockClient:
     def send_marking_codes(self, order_id: str, codes: list[str]) -> dict:
         return {"ok": True, "accepted": len(codes)}
 
+    def _blank_supply(self) -> dict:
+        return {
+            "orders": [],
+            "name": None,
+            "done": False,
+            "createdAt": dt.datetime.now(dt.timezone.utc).isoformat(),
+            "closedAt": None,
+            "scanDt": None,
+        }
+
     def create_supply(self, name: str | None = None) -> str:
         supply_id = f"WB-SUPPLY-{uuid.uuid4().hex[:8]}"
-        self._supplies[supply_id] = {"status": "open", "orders": [], "name": name}
+        supply = self._blank_supply()
+        supply["name"] = name
+        self._supplies[supply_id] = supply
         return supply_id
 
     def add_order_to_supply(self, supply_id: str, order_id: str) -> dict:
-        self._supplies.setdefault(supply_id, {"status": "open", "orders": []})
+        self._supplies.setdefault(supply_id, self._blank_supply())
         self._supplies[supply_id]["orders"].append(order_id)
         return {"ok": True}
 
     def close_supply(self, supply_id: str) -> dict:
-        self._supplies.setdefault(supply_id, {"status": "open", "orders": []})
-        self._supplies[supply_id]["status"] = "closed"
+        # "Закрытие" поставки в модели WB — это передача в доставку (PATCH
+        # .../deliver): done становится true, а принятой (scanDt) поставка
+        # станет только когда склад WB её физически отсканирует (Этап 4, п.4.1).
+        self._supplies.setdefault(supply_id, self._blank_supply())
+        self._supplies[supply_id]["done"] = True
+        self._supplies[supply_id]["closedAt"] = dt.datetime.now(dt.timezone.utc).isoformat()
         return {"ok": True, "status": "closed"}
+
+    def mark_supply_accepted(self, supply_id: str) -> None:
+        """Тестовый хук — эмулирует приёмку поставки складом WB (scanDt
+        заполняется): следующий sync_supplies() увидит статус ACCEPTED."""
+        self._supplies.setdefault(supply_id, self._blank_supply())
+        self._supplies[supply_id]["done"] = True
+        self._supplies[supply_id]["scanDt"] = dt.datetime.now(dt.timezone.utc).isoformat()
+
+    def list_supplies(self, next_cursor: int | None = None, limit: int = 1000) -> WbSuppliesPage:
+        # Мок не пагинирует по-настоящему — все поставки клиента умещаются в
+        # одну "страницу" и next всегда None, этого достаточно, чтобы юнит-тесты
+        # проверяли логику фильтрации/upsert, а не саму курсорную пагинацию WB.
+        supplies = [
+            {
+                "id": supply_id,
+                "name": s["name"],
+                "done": s["done"],
+                "createdAt": s["createdAt"],
+                "closedAt": s["closedAt"],
+                "scanDt": s["scanDt"],
+            }
+            for supply_id, s in self._supplies.items()
+        ]
+        return {"supplies": supplies, "next": None}
+
+    def get_supply_orders(self, supply_id: str) -> list[str]:
+        return list(self._supplies.get(supply_id, {}).get("orders", []))
 
     def get_supply_qr(self, supply_id: str) -> WbSticker:
         return {"type": "png", "data": _PNG_1PX}

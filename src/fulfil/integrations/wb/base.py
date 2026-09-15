@@ -68,6 +68,23 @@ class WbSticker(TypedDict):
     data: str  # base64
 
 
+class WbSupplyInfo(TypedDict):
+    """Строка ответа GET /api/v3/supplies (Этап 4, п.4.2) — done/scanDt решают,
+    какой статус получит наша Supply (см. services/supplies._status_from_wb)."""
+
+    id: str
+    name: str | None
+    done: bool
+    createdAt: str | None
+    closedAt: str | None
+    scanDt: str | None
+
+
+class WbSuppliesPage(TypedDict):
+    supplies: list[WbSupplyInfo]
+    next: int | None  # курсор следующей страницы, None = последняя страница
+
+
 class WBClient(Protocol):
     def ping(self) -> dict:
         """Best-effort проверка подключения — GET /ping на каждом хосте API клиента.
@@ -116,6 +133,17 @@ class WBClient(Protocol):
     def add_order_to_supply(self, supply_id: str, order_id: str) -> dict: ...
 
     def close_supply(self, supply_id: str) -> dict: ...
+
+    def list_supplies(self, next_cursor: int | None = None, limit: int = 1000) -> WbSuppliesPage:
+        """Постраничный список ВСЕХ поставок продавца (Этап 4, п.4.2) —
+        GET /api/v3/supplies, курсор `next` из предыдущего ответа."""
+        ...
+
+    def get_supply_orders(self, supply_id: str) -> list[str]:
+        """orderId'шники, входящие в поставку — синхронизация использует это,
+        чтобы решить, "наша" ли чужая поставка (создана не через Fulfil, но
+        содержит наш заказ)."""
+        ...
 
     def get_supply_qr(self, supply_id: str) -> WbSticker: ...
 

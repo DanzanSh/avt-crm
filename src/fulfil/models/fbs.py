@@ -26,6 +26,11 @@ class SupplyStatus(str, enum.Enum):
     PARTIAL = "partial"
     FAILED = "failed"
     STALE = "stale"
+    # Этап 4 плана №3, п.6 problems.txt: статус выводится из полей WB (wb_done,
+    # scan_dt), а не назначается вручную по одному месту в коде — done=false
+    # остаётся OPEN, done=true без scanDt — IN_DELIVERY, scanDt заполнен — ACCEPTED.
+    IN_DELIVERY = "in_delivery"
+    ACCEPTED = "accepted"
 
 
 class Order(Base):
@@ -145,7 +150,19 @@ class Supply(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     client_id: Mapped[int] = mapped_column(ForeignKey("clients.id"), index=True)
     wb_supply_id: Mapped[str | None] = mapped_column(String(64), unique=True, index=True)
+    # Имя, отправленное в WB при создании ("<клиент> <дата>" — Этап 3, п.3.2) или
+    # прочитанное из чужой поставки при синхронизации (Этап 4, п.4.2). Раньше не
+    # персистилось вовсе.
+    name: Mapped[str | None] = mapped_column(String(255))
     status: Mapped[SupplyStatus] = mapped_column(default=SupplyStatus.OPEN, index=True)
+    # done/scanDt — сырые поля WB, из которых services.supplies выводит status
+    # (Этап 4, п.4.1). closed_at — момент, когда МЫ вызвали close_supply (наш
+    # локальный акт передачи в доставку); closed_at_wb — то, что при синхронизации
+    # отдаёт сам WB (может быть выставлено и без нашего участия).
+    wb_done: Mapped[bool] = mapped_column(default=False)
+    created_at_wb: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    closed_at_wb: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    scan_dt: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     closed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     qr_data: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[dt.datetime] = mapped_column(
@@ -156,6 +173,13 @@ class Supply(Base):
         back_populates="supply", cascade="all, delete-orphan"
     )
     client: Mapped["Client"] = relationship()
+    # Заказы поставки — односторонняя связь для отдачи в API ("список заказов
+    # раскрывается по клику", Этап 4, п.4.3). viewonly: принадлежность заказа
+    # поставке по-прежнему меняется через прямое присвоение order.supply_id
+    # (services.supplies.add_order_to_supply), а не через эту коллекцию.
+    orders: Mapped[list["Order"]] = relationship(
+        foreign_keys="Order.supply_id", viewonly=True, order_by="Order.id"
+    )
 
     @property
     def client_name(self) -> str | None:

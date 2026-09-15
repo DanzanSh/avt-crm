@@ -12,47 +12,130 @@
     .qr-area:empty { display: none; }
     .qr-area { display: flex; gap: 8px; flex-wrap: wrap; }
     .qr-img { max-width: 160px; border: 1px solid var(--border); border-radius: var(--radius-sm); }
+    .tabs { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 16px; }
+    .tab-tile { cursor: pointer; border: 1px solid var(--border); min-width: 140px; }
+    .tab-tile:hover { filter: brightness(1.05); }
+    .tab-tile.active { outline: 2px solid var(--blue); }
+    .supply-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .supply-meta { font-size: 15px; color: var(--text-2); }
+    .supply-progress { font-size: 15px; color: var(--text-2); }
+    .orders-toggle {
+      background: none; border: none; color: var(--blue); cursor: pointer;
+      font-size: 15px; font-family: var(--font-ui); padding: 0;
+    }
+    .orders-list { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
+    .orders-list[hidden] { display: none; }
+    .order-line { display: flex; align-items: center; gap: 8px; font-size: 15px; }
+    .order-line .order-num { font-family: var(--mono); color: var(--text-2); }
   </style>
 </head>
 <body>
   <div class="page-head">
     <h1 class="page-title">Поставки</h1>
-    <button class="btn btn-primary" id="btnCreate">+ Новая поставка</button>
+    <div class="toolbar">
+      <button class="btn" id="btnSync">Обновить из WB</button>
+      <button class="btn btn-primary" id="btnCreate">+ Новая поставка</button>
+    </div>
   </div>
 
   <div id="clientFilterMount" style="margin-bottom:14px;"></div>
+
+  <div class="tabs" id="tabs"></div>
 
   <div id="list">Загрузка…</div>
 
   <script src="/js/sidebar.js"></script>
   <script>
     const STATUS_LABELS = {
-      open: ['Открыта', 'badge-blue'],
+      open: ['На сборке', 'badge-blue'],
+      in_delivery: ['В доставке', 'badge-orange'],
+      accepted: ['Принята', 'badge-green'],
       closed: ['Закрыта', 'badge-green'],
       partial: ['Частично', 'badge-orange'],
       failed: ['Ошибка', 'badge-red'],
       stale: ['Закрыта на стороне WB', 'badge-red'],
     };
 
-    async function load() {
-      const list = document.getElementById('list');
+    const ASSEMBLED_ORDER_STATUSES = new Set(['packed', 'in_supply', 'shipped', 'delivered']);
+
+    const TABS = [
+      { key: 'assembly', label: 'На сборке' },
+      { key: 'in_delivery', label: 'В доставке' },
+      { key: 'accepted', label: 'Принятые' },
+      { key: 'other', label: 'Прочие' },
+    ];
+
+    let currentGroup = 'assembly';
+    const expanded = new Set();
+
+    function renderTabs(counters) {
+      counters = counters || {};
+      const el = document.getElementById('tabs');
+      el.innerHTML = TABS.map(
+        (t) => `
+        <div class="card stat-card tab-tile${currentGroup === t.key ? ' active' : ''}" data-group="${t.key}">
+          <span class="stat-card__label">${t.label}</span>
+          <span class="stat-card__value">${counters[t.key] || 0}</span>
+        </div>`
+      ).join('');
+      el.querySelectorAll('.tab-tile').forEach((tile) =>
+        tile.addEventListener('click', () => {
+          currentGroup = tile.dataset.group;
+          load();
+        })
+      );
+    }
+
+    async function loadCounters() {
       try {
         const q = Fulfil.clientFilter.clientId ? `?client_id=${Fulfil.clientFilter.clientId}` : '';
-        const supplies = await Fulfil.api('GET', '/fbs/supplies' + q);
+        const counters = await Fulfil.api('GET', '/fbs/supplies/counters' + q);
+        renderTabs(counters);
+      } catch (err) {
+        renderTabs({});
+      }
+    }
+
+    function ordersLineHtml(o) {
+      const [label] = STATUS_LABELS[o.status] || [o.status];
+      return `<div class="order-line"><span class="order-num">${Fulfil.esc(o.wbOrderId)}</span><span>${Fulfil.esc(label || o.status)}</span></div>`;
+    }
+
+    async function load() {
+      loadCounters();
+      const list = document.getElementById('list');
+      try {
+        const params = new URLSearchParams();
+        if (Fulfil.clientFilter.clientId) params.set('client_id', Fulfil.clientFilter.clientId);
+        if (currentGroup) params.set('group', currentGroup);
+        const supplies = await Fulfil.api('GET', '/fbs/supplies?' + params.toString());
         if (!supplies.length) {
-          list.innerHTML = '<div class="empty-state">Поставок пока нет</div>';
+          list.innerHTML = '<div class="empty-state">Поставок в этой вкладке нет</div>';
           return;
         }
         list.innerHTML = supplies
           .map((s) => {
             const [label, cls] = STATUS_LABELS[s.status] || [s.status, 'badge-muted'];
             const canClose = s.status === 'open';
-            const canQr = s.status === 'closed' || s.status === 'partial';
+            const canQr = ['in_delivery', 'accepted', 'closed', 'partial'].includes(s.status);
+            const assembled = s.orders.filter((o) => ASSEMBLED_ORDER_STATUSES.has(o.status)).length;
+            const created = s.createdAt ? new Date(s.createdAt).toLocaleString('ru-RU') : '';
+            const isExpanded = expanded.has(s.id);
             return `
           <div class="list-card" data-id="${s.id}">
-            <div class="supply-id">${Fulfil.esc(s.wbSupplyId || '—')}</div>
-            <span class="badge badge-muted">${Fulfil.esc(s.clientName || '')}</span>
-            <span class="badge ${cls}">${label}</span>
+            <div class="supply-head">
+              <div class="supply-id">${Fulfil.esc(s.wbSupplyId || '—')}</div>
+              <span class="badge badge-muted">${Fulfil.esc(s.clientName || '')}</span>
+              <span class="badge ${cls}">${label}</span>
+            </div>
+            <div class="supply-meta">${Fulfil.esc(s.name || '')}${s.name ? ' · ' : ''}${created}</div>
+            <div class="supply-progress">
+              Собрано ${assembled} из ${s.orders.length} ${Fulfil.plural(s.orders.length, 'заказ', 'заказа', 'заказов')}
+              ${s.orders.length ? `· <button class="orders-toggle" data-id="${s.id}">${isExpanded ? 'Скрыть' : 'Показать'} заказы</button>` : ''}
+            </div>
+            <div class="orders-list" id="orders-${s.id}" ${isExpanded ? '' : 'hidden'}>
+              ${s.orders.map(ordersLineHtml).join('')}
+            </div>
             <div class="supply-actions">
               ${canClose ? `<button class="btn btn-close" data-id="${s.id}">Закрыть поставку</button>` : ''}
               ${canQr ? `<button class="btn btn-qr" data-id="${s.id}">QR поставки</button>` : ''}
@@ -63,6 +146,16 @@
           })
           .join('');
 
+        document.querySelectorAll('.orders-toggle').forEach((b) =>
+          b.addEventListener('click', () => {
+            const id = Number(b.dataset.id);
+            if (expanded.has(id)) expanded.delete(id);
+            else expanded.add(id);
+            const box = document.getElementById('orders-' + id);
+            box.hidden = !expanded.has(id);
+            b.textContent = (expanded.has(id) ? 'Скрыть' : 'Показать') + ' заказы';
+          })
+        );
         document.querySelectorAll('.btn-close').forEach((b) => b.addEventListener('click', () => closeSupply(b.dataset.id)));
         document.querySelectorAll('.btn-qr').forEach((b) => b.addEventListener('click', () => showQr(b.dataset.id)));
         document.querySelectorAll('.btn-boxes').forEach((b) => b.addEventListener('click', () => showBoxes(b.dataset.id)));
@@ -105,19 +198,25 @@
     });
 
     async function closeSupply(id) {
+      const ok = confirm('Поставка будет передана в доставку на Wildberries. Обратной операции нет. Продолжить?');
+      if (!ok) return;
       try {
         await Fulfil.api('POST', `/fbs/supplies/${id}/close`);
-        Fulfil.toast('Поставка закрыта');
+        Fulfil.toast('Поставка передана в доставку');
         load();
       } catch (err) {
-        Fulfil.toast(Fulfil.errorText(err), 'error');
+        if (err.reasonCode === 'unassembled_orders' && err.orders && err.orders.length) {
+          const nums = err.orders.map((o) => o.wbOrderId).join(', ');
+          Fulfil.toast(`${Fulfil.errorText(err)} Несобранные заказы: ${nums}`, 'error');
+        } else {
+          Fulfil.toast(Fulfil.errorText(err), 'error');
+        }
       }
     }
 
     async function showQr(id) {
       const area = document.getElementById('qr-' + id);
       try {
-        // QR поставки доступен только после закрытия — сервер сам это проверит (409, если рано).
         const qr = await Fulfil.api('GET', `/fbs/supplies/${id}/qr`);
         area.innerHTML = `<img class="qr-img" src="data:image/${qr.type};base64,${qr.data}" alt="QR поставки" />`;
       } catch (err) {
@@ -144,6 +243,26 @@
         Fulfil.toast(Fulfil.errorText(err), 'error');
       }
     }
+
+    document.getElementById('btnSync').addEventListener('click', async () => {
+      try {
+        const clientId = Fulfil.clientFilter.clientId;
+        const results = await Fulfil.api('POST', '/fbs/supplies/sync' + (clientId ? `?client_id=${clientId}` : ''));
+        if (!results.length) {
+          Fulfil.toast('Нет клиентов с ключом API и выбранным складом для синхронизации', 'error');
+        } else {
+          results.forEach((r) => {
+            const msg = r.error
+              ? `${r.clientName}: ошибка — ${r.error}`
+              : `${r.clientName}: новых поставок ${r.imported}, обновлено ${r.updated}`;
+            Fulfil.toast(msg, r.error ? 'error' : 'success');
+          });
+        }
+        load();
+      } catch (err) {
+        Fulfil.toast(Fulfil.errorText(err), 'error');
+      }
+    });
 
     Fulfil.clientFilter.mount(document.getElementById('clientFilterMount'), load).then(load);
   </script>

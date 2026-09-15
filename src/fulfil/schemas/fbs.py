@@ -71,9 +71,37 @@ class CreateSupplyRequest(CamelModel):
     client_id: int
 
 
+class SupplyOrderOut(CamelModel):
+    id: int
+    wb_order_id: str
+    status: str
+
+
 class SupplyOut(CamelModel):
     id: int
     client_id: int
     client_name: str | None = None
     wb_supply_id: str | None
+    name: str | None = None
     status: str
+    wb_done: bool
+    created_at: dt.datetime
+    created_at_wb: dt.datetime | None = None
+    closed_at_wb: dt.datetime | None = None
+    scan_dt: dt.datetime | None = None
+    orders: list[SupplyOrderOut] = []
+
+
+class SupplyCountersOut(CamelModel):
+    assembly: int
+    in_delivery: int
+    accepted: int
+    other: int
+
+
+class SyncSuppliesResultOut(CamelModel):
+    client_id: int
+    client_name: str | None = None
+    imported: int
+    updated: int
+    error: str | None = None

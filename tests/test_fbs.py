@@ -1,5 +1,8 @@
-"""Заказы ФБС — фильтр по складу продавца, статусы WB, unknown_sku, поставки
-при «взятии в работу» (Этап 3 плана №3, пп.4.1, 4.2 problems.txt)."""
+"""Заказы и поставки ФБС — фильтр по складу продавца, статусы WB, unknown_sku,
+поставки при «взятии в работу» (Этап 3 плана №3, пп.4.1, 4.2), статус доставки/
+приёмки поставок (Этап 4, п.6 problems.txt)."""
+
+import datetime as dt
 
 import pytest
 from sqlalchemy import func, select
@@ -15,6 +18,13 @@ from fulfil.services.orders import (
     sync_orders_from_wb,
     take_to_work,
     take_to_work_bulk,
+)
+from fulfil.services.supplies import (
+    close_supply,
+    create_supply,
+    get_supply_counters,
+    list_supplies,
+    sync_supplies,
 )
 
 
@@ -248,3 +258,131 @@ def test_order_counters_and_group_filters(db, seller):
     assert {o.wb_order_id for o in list_orders(db, client_id=seller.id, group="assembly")} == {"C-2", "C-3"}
     assert {o.wb_order_id for o in list_orders(db, client_id=seller.id, group="packed")} == {"C-4"}
     assert {o.wb_order_id for o in list_orders(db, client_id=seller.id, group="archive")} == {"C-5", "C-6"}
+
+
+# --- Поставки: статус выводится из done/scanDt (Этап 4, п.6 problems.txt) ----
+
+
+def test_create_supply_persists_name(db, seller):
+    """Имя раньше уходило только в WB и терялось у нас (Этап 3, «Что вышло
+    иначе» №2) — теперь персистится."""
+    supply = create_supply(db, seller, WBMockClient(client_id=seller.id))
+    assert supply.name == f"{seller.name} {dt.date.today().isoformat()}"
+
+
+def test_close_supply_rejects_unassembled_orders(db, seller):
+    wb = WBMockClient(client_id=seller.id)
+    supply = create_supply(db, seller, wb)
+    unassembled = Order(
+        client_id=seller.id, wb_order_id="SUP-1", status=OrderStatus.CONFIRMED, supply_id=supply.id
+    )
+    db.add(unassembled)
+    db.commit()
+
+    with pytest.raises(AppError) as exc_info:
+        close_supply(db, supply, wb)
+
+    assert exc_info.value.reason_code == "unassembled_orders"
+    assert exc_info.value.extra["orders"] == [{"id": unassembled.id, "wbOrderId": "SUP-1"}]
+    db.refresh(supply)
+    assert supply.status == SupplyStatus.OPEN  # ничего не изменилось
+
+
+def test_close_supply_ships_packed_orders(db, seller):
+    wb = WBMockClient(client_id=seller.id)
+    supply = create_supply(db, seller, wb)
+    packed = Order(client_id=seller.id, wb_order_id="SUP-2", status=OrderStatus.PACKED, supply_id=supply.id)
+    db.add(packed)
+    db.commit()
+
+    result = close_supply(db, supply, wb)
+
+    assert result.status == SupplyStatus.IN_DELIVERY
+    assert result.wb_done is True
+    assert result.closed_at is not None
+    db.refresh(packed)
+    assert packed.status == OrderStatus.SHIPPED
+
+
+def test_close_supply_wrong_status_rejected(db, seller):
+    supply = Supply(client_id=seller.id, status=SupplyStatus.IN_DELIVERY)
+    db.add(supply)
+    db.commit()
+
+    with pytest.raises(AppError) as exc_info:
+        close_supply(db, supply, WBMockClient(client_id=seller.id))
+    assert exc_info.value.reason_code == "wrong_status"
+
+
+def test_sync_supplies_reflects_done_and_scan_dt(db, seller):
+    """done=false -> На сборке, done=true без scanDt -> В доставке, scanDt
+    заполнен -> Принята (Этап 4, п.4.1 плана №3)."""
+    wb = WBMockClient(client_id=seller.id)
+    supply = create_supply(db, seller, wb)
+
+    sync_supplies(db, seller, wb)
+    db.refresh(supply)
+    assert supply.status == SupplyStatus.OPEN
+
+    wb.close_supply(supply.wb_supply_id)  # деливери напрямую на стороне WB
+    sync_supplies(db, seller, wb)
+    db.refresh(supply)
+    assert supply.status == SupplyStatus.IN_DELIVERY
+    assert supply.wb_done is True
+    assert supply.closed_at_wb is not None
+
+    wb.mark_supply_accepted(supply.wb_supply_id)
+    sync_supplies(db, seller, wb)
+    db.refresh(supply)
+    assert supply.status == SupplyStatus.ACCEPTED
+    assert supply.scan_dt is not None
+
+
+def test_sync_supplies_imports_foreign_supply_with_our_order(db, seller):
+    """Поставка, собранная селлером в личном кабинете WB (не через create_supply),
+    но содержащая наш заказ — импортируется (Этап 4, п.4.2)."""
+    _with_warehouse(seller)
+    order = Order(client_id=seller.id, wb_order_id="FOREIGN-ORD-1", status=OrderStatus.CONFIRMED)
+    db.add(order)
+    db.commit()
+
+    wb = WBMockClient(client_id=seller.id)
+    foreign_supply_id = wb.create_supply("Собрана в кабинете WB")
+    wb.add_order_to_supply(foreign_supply_id, "FOREIGN-ORD-1")
+
+    result = sync_supplies(db, seller, wb)
+
+    assert result["imported"] == 1
+    supply = db.scalar(select(Supply).where(Supply.wb_supply_id == foreign_supply_id))
+    assert supply is not None
+    assert supply.client_id == seller.id
+
+
+def test_sync_supplies_ignores_foreign_supply_without_our_orders(db, seller):
+    """Поставка другого склада селлера, где наших заказов нет, игнорируется —
+    не наша зона интересов (Этап 4, п.4.2)."""
+    wb = WBMockClient(client_id=seller.id)
+    foreign_supply_id = wb.create_supply("Совсем чужая")
+    wb.add_order_to_supply(foreign_supply_id, "NOT-OUR-ORDER")
+
+    result = sync_supplies(db, seller, wb)
+
+    assert result["imported"] == 0
+    assert db.scalar(select(Supply).where(Supply.wb_supply_id == foreign_supply_id)) is None
+
+
+def test_supply_counters_and_group_filters(db, seller):
+    open_supply = Supply(client_id=seller.id, status=SupplyStatus.OPEN)
+    in_delivery_supply = Supply(client_id=seller.id, status=SupplyStatus.IN_DELIVERY)
+    accepted_supply = Supply(client_id=seller.id, status=SupplyStatus.ACCEPTED)
+    failed_supply = Supply(client_id=seller.id, status=SupplyStatus.FAILED)
+    db.add_all([open_supply, in_delivery_supply, accepted_supply, failed_supply])
+    db.commit()
+
+    counters = get_supply_counters(db, client_id=seller.id)
+    assert counters == {"assembly": 1, "in_delivery": 1, "accepted": 1, "other": 1}
+
+    assert {s.id for s in list_supplies(db, client_id=seller.id, group="assembly")} == {open_supply.id}
+    assert {s.id for s in list_supplies(db, client_id=seller.id, group="in_delivery")} == {in_delivery_supply.id}
+    assert {s.id for s in list_supplies(db, client_id=seller.id, group="accepted")} == {accepted_supply.id}
+    assert {s.id for s in list_supplies(db, client_id=seller.id, group="other")} == {failed_supply.id}

@@ -14,7 +14,9 @@ from fulfil.schemas.fbs import (
     OrderOut,
     PickLineOut,
     ScanMarkRequest,
+    SupplyCountersOut,
     SupplyOut,
+    SyncSuppliesResultOut,
     TakeToWorkBulkRequest,
     TakeToWorkBulkResultOut,
 )
@@ -151,12 +153,34 @@ def create_supply(body: CreateSupplyRequest, db: Session = Depends(get_db)) -> S
     return supplies_service.create_supply(db, client, wb_client)
 
 
-@router.get("/supplies", response_model=list[SupplyOut])
-def list_supplies(client_id: int | None = None, db: Session = Depends(get_db)) -> list[Supply]:
-    stmt = select(Supply).order_by(Supply.id.desc())
+@router.post("/supplies/sync", response_model=list[SyncSuppliesResultOut])
+def sync_supplies(client_id: int | None = None, db: Session = Depends(get_db)) -> list[dict]:
+    """client_id не передан — синкает по очереди всех активных клиентов со
+    складом (Этап 4, п.4.2); ошибка одного клиента не останавливает остальных."""
     if client_id is not None:
-        stmt = stmt.where(Supply.client_id == client_id)
-    return list(db.scalars(stmt))
+        client = clients_service.get_live_client_or_404(db, client_id)
+        wb_client = get_wb_client(client)
+        try:
+            stats = supplies_service.sync_supplies(db, client, wb_client)
+            return [{"clientId": client.id, "clientName": client.name, "error": None, **stats}]
+        except AppError as exc:
+            db.rollback()
+            return [
+                {"clientId": client.id, "clientName": client.name, "imported": 0, "updated": 0, "error": exc.detail}
+            ]
+    return supplies_service.sync_supplies_all(db)
+
+
+@router.get("/supplies", response_model=list[SupplyOut])
+def list_supplies(
+    client_id: int | None = None, group: str | None = None, db: Session = Depends(get_db)
+) -> list[Supply]:
+    return supplies_service.list_supplies(db, client_id=client_id, group=group)
+
+
+@router.get("/supplies/counters", response_model=SupplyCountersOut)
+def supply_counters(client_id: int | None = None, db: Session = Depends(get_db)) -> dict:
+    return supplies_service.get_supply_counters(db, client_id=client_id)
 
 
 def _get_supply(db: Session, supply_id: int) -> Supply:
