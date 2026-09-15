@@ -356,9 +356,11 @@ class WBHttpClient:
         return {"ok": resp.status_code < 300, "status": "closed"}
 
     def list_supplies(self, next_cursor: int | None = None, limit: int = 1000) -> WbSuppliesPage:
-        params: dict = {"limit": limit}
-        if next_cursor:
-            params["next"] = next_cursor
+        # `next` — обязательный параметр у WB (курсор первой страницы = 0), а не
+        # опциональный, как предполагалось изначально (Этап 4, best-effort из
+        # docs/wb-api-contract.md). Его отсутствие на первом вызове WB отвечает
+        # 400 IncorrectParameter — поймано на реальном токене.
+        params: dict = {"limit": limit, "next": next_cursor or 0}
         resp = self._request("GET", "/api/v3/supplies", params=params)
         data = resp.json()
         supplies = [

@@ -230,6 +230,38 @@ def test_set_fbs_stocks_sends_batch(monkeypatch):
     assert result == {"ok": True}
 
 
+def test_list_supplies_always_sends_next_param(monkeypatch):
+    """Регресс: `next` у WB — обязательный параметр (курсор первой страницы —
+    0, а не отсутствие параметра). Старая версия слала `next` только когда
+    next_cursor было truthy, и WB отвечал 400 IncorrectParameter на первом
+    вызове (Этап 4 плана №3, проверено на реальном токене)."""
+    client = WBHttpClient("test-token")
+    seen = {}
+
+    def _fake_request(method, path, *, base=None, params=None, **kw):
+        seen.update(method=method, path=path, params=params)
+        return _Resp({"supplies": [], "next": 0})
+
+    monkeypatch.setattr(client, "_request", _fake_request)
+    client.list_supplies()
+
+    assert seen == {"method": "GET", "path": "/api/v3/supplies", "params": {"limit": 1000, "next": 0}}
+
+
+def test_list_supplies_forwards_given_cursor(monkeypatch):
+    client = WBHttpClient("test-token")
+    seen = {}
+
+    def _fake_request(method, path, *, base=None, params=None, **kw):
+        seen.update(params=params)
+        return _Resp({"supplies": [], "next": None})
+
+    monkeypatch.setattr(client, "_request", _fake_request)
+    client.list_supplies(next_cursor=42, limit=100)
+
+    assert seen["params"] == {"limit": 100, "next": 42}
+
+
 def test_ping_checks_both_hosts(monkeypatch):
     client = WBHttpClient("test-token")
     seen_bases = []

@@ -8,7 +8,7 @@ import pytest
 from sqlalchemy import func, select
 
 from conftest import make_client
-from fulfil.errors import AppError
+from fulfil.errors import AppError, WbApiError
 from fulfil.integrations.wb.mock import WBMockClient
 from fulfil.models.fbs import Order, OrderStatus, Supply, SupplyStatus
 from fulfil.services.orders import (
@@ -369,6 +369,31 @@ def test_sync_supplies_ignores_foreign_supply_without_our_orders(db, seller):
 
     assert result["imported"] == 0
     assert db.scalar(select(Supply).where(Supply.wb_supply_id == foreign_supply_id)) is None
+
+
+def test_sync_supplies_skips_supply_when_orders_endpoint_404s(db, seller):
+    """WB отвечает 404 "path not found" на GET .../{id}/orders для части
+    поставок (проверено на реальном токене) — такая поставка-кандидат
+    пропускается, а не роняет синк остальных поставок клиента: уже известные
+    нам поставки этот вызов вообще не затрагивает (см. known_ids)."""
+
+    class _BoomOnOrders(WBMockClient):
+        def get_supply_orders(self, supply_id):
+            raise WbApiError('WB вернул 404 "path not found"', upstream_status=404)
+
+    wb = _BoomOnOrders(client_id=seller.id)
+    broken_supply_id = wb.create_supply("Недоступная поставка")
+    wb.add_order_to_supply(broken_supply_id, "SOME-ORDER")
+
+    known = create_supply(db, seller, wb)
+    wb.close_supply(known.wb_supply_id)  # done=True на стороне WB
+
+    result = sync_supplies(db, seller, wb)
+
+    assert result == {"imported": 0, "updated": 1}
+    assert db.scalar(select(Supply).where(Supply.wb_supply_id == broken_supply_id)) is None
+    db.refresh(known)
+    assert known.status == SupplyStatus.IN_DELIVERY
 
 
 def test_supply_counters_and_group_filters(db, seller):

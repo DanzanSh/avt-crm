@@ -7,15 +7,18 @@ QR поставки WB выдаёт только после её закрыти�
 """
 
 import datetime as dt
+import logging
 
 from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session, selectinload
 
-from fulfil.errors import AppError
+from fulfil.errors import AppError, WbApiError
 from fulfil.integrations.wb import get_wb_client
 from fulfil.integrations.wb.base import WBClient
 from fulfil.models.client import Client
 from fulfil.models.fbs import Order, OrderStatus, Supply, SupplyBox, SupplyStatus
+
+logger = logging.getLogger(__name__)
 
 # Заказы поставки, которые ещё не прошли сборку — закрыть (передать в доставку)
 # поставку с такими заказами нельзя: WB не даст собрать их отдельно после этого.
@@ -192,7 +195,21 @@ def sync_supplies(db: Session, client: Client, wb_client: WBClient) -> dict:
             wb_id = str(s["id"])
             is_ours = wb_id in known_ids
             if not is_ours:
-                order_ids = set(wb_client.get_supply_orders(wb_id))
+                try:
+                    order_ids = set(wb_client.get_supply_orders(wb_id))
+                except WbApiError:
+                    # На части кабинетов/поставок GET .../{id}/orders отвечает
+                    # 404 "path not found" (проверено на реальном токене —
+                    # см. docs/wb-api-contract.md) — WB не даёт заглянуть внутрь
+                    # этой конкретной поставки, значит понять, "наша" ли она,
+                    # нечем. Пропускаем именно эту поставку-кандидата, а не
+                    # весь синк: уже известные нам поставки в этом же вызове
+                    # (known_ids) такой проверки не проходят и не страдают.
+                    logger.debug(
+                        "sync_supplies: не удалось прочитать заказы поставки %s клиента %s — пропущена",
+                        wb_id, client.id,
+                    )
+                    continue
                 is_ours = bool(order_ids & our_order_ids)
             if not is_ours:
                 continue
