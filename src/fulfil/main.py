@@ -1,12 +1,26 @@
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
+from fulfil import jobs
 from fulfil.api.v1 import audit, auth, clients, fbs, products, receiving, scan, settings_, stock, storage
 from fulfil.errors import AppError, app_error_handler
 
-app = FastAPI(title="Fulfil PoC")
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    # Фоновый опрос WB (Этап 3 плана №3, п.3.1) — заказы + их статусы по каждому
+    # клиенту. WB_SYNC_INTERVAL_SEC=0 отключает его совсем.
+    jobs.start()
+    try:
+        yield
+    finally:
+        jobs.stop()
+
+
+app = FastAPI(title="Fulfil PoC", lifespan=lifespan)
 app.add_exception_handler(AppError, app_error_handler)
 
 app.include_router(auth.router, prefix="/api/v1")

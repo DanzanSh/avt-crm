@@ -15,7 +15,15 @@ import httpx
 from fulfil.config import get_settings
 from fulfil.db import SessionLocal
 from fulfil.errors import WbApiError
-from fulfil.integrations.wb.base import WbCardsPage, WbCursor, WbOffice, WbOrder, WbSticker, WbWarehouse
+from fulfil.integrations.wb.base import (
+    WbCardsPage,
+    WbCursor,
+    WbOffice,
+    WbOrder,
+    WbOrderStatus,
+    WbSticker,
+    WbWarehouse,
+)
 from fulfil.models.wb_log import WbApiLog
 
 _MAX_RETRIES = 3
@@ -278,6 +286,10 @@ class WBHttpClient:
             {
                 "orderId": str(o.get("id")),
                 "supplyId": o.get("supplyId"),
+                "warehouseId": str(o["warehouseId"]) if o.get("warehouseId") is not None else None,
+                "nmId": o.get("nmId"),
+                "chrtId": o.get("chrtId"),
+                "article": o.get("article"),
                 "createdAt": o.get("createdAt", ""),
                 "deadlineAt": None,
                 "items": [{"barcode": o.get("skus", [""])[0], "qty": 1}],
@@ -285,9 +297,38 @@ class WBHttpClient:
             for o in data.get("orders", [])
         ]
 
-    def get_order_sticker(self, order_id: str) -> WbSticker:
+    def get_order_statuses(self, order_ids: list[str]) -> dict[str, WbOrderStatus]:
+        if not order_ids:
+            return {}
+        # wb_order_id в базе не всегда числовой ID WB (например, оставшиеся демо-заказы
+        # из режима wb_mode=mock вида "WB-ORDER-DEMO-1") — такие пропускаем, а не валим
+        # опрос статусов остальных заказов клиента ValueError-ом.
+        numeric_ids = []
+        for oid in order_ids:
+            try:
+                numeric_ids.append(int(oid))
+            except (TypeError, ValueError):
+                continue
+        if not numeric_ids:
+            return {}
         resp = self._request(
-            "POST", "/api/v3/orders/stickers", json={"orders": [int(order_id)]}, params={"type": "png"}
+            "POST", "/api/v3/orders/status", json={"orders": numeric_ids}
+        )
+        data = resp.json()
+        return {
+            str(o.get("id")): {"wbStatus": o.get("wbStatus"), "supplierStatus": o.get("supplierStatus")}
+            for o in data.get("orders", [])
+        }
+
+    def get_order_sticker(self, order_id: str) -> WbSticker:
+        try:
+            numeric_id = int(order_id)
+        except (TypeError, ValueError):
+            raise WbApiError(
+                f'Заказ "{order_id}" не является настоящим заказом WB — стикер недоступен.'
+            )
+        resp = self._request(
+            "POST", "/api/v3/orders/stickers", json={"orders": [numeric_id]}, params={"type": "png"}
         )
         data = resp.json()
         stickers = data.get("stickers", [])
@@ -301,8 +342,8 @@ class WBHttpClient:
         return {"ok": resp.status_code < 300}
 
     # --- Поставки ---
-    def create_supply(self) -> str:
-        resp = self._request("POST", "/api/v3/supplies", json={"name": "Поставка PoC"})
+    def create_supply(self, name: str | None = None) -> str:
+        resp = self._request("POST", "/api/v3/supplies", json={"name": name or "Поставка Fulfil"})
         return str(resp.json().get("id"))
 
     def add_order_to_supply(self, supply_id: str, order_id: str) -> dict:

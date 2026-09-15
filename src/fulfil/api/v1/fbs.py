@@ -6,15 +6,17 @@ from fulfil.auth import get_current_user
 from fulfil.db import get_db
 from fulfil.errors import AppError, NotFoundError
 from fulfil.integrations.wb import get_wb_client
-from fulfil.models.client import Client
 from fulfil.models.fbs import Order, OrderItem, Supply
 from fulfil.schemas.fbs import (
     CreateBoxesRequest,
     CreateSupplyRequest,
+    OrderCountersOut,
     OrderOut,
     PickLineOut,
     ScanMarkRequest,
     SupplyOut,
+    TakeToWorkBulkRequest,
+    TakeToWorkBulkResultOut,
 )
 from fulfil.services import clients as clients_service
 from fulfil.services import marking as marking_service
@@ -31,35 +33,40 @@ router = APIRouter(prefix="/fbs", tags=["fbs"], dependencies=[Depends(get_curren
 @router.post("/orders/sync")
 def sync_orders(client_id: int | None = None, db: Session = Depends(get_db)) -> dict:
     """client_id не передан — синкает по очереди всех активных клиентов с заданным
-    ключом API; ошибка одного клиента не останавливает остальных (Этап 1, п.1.4)."""
+    ключом API и выбранным складом (Этап 3, п.3.1); ошибка одного клиента не
+    останавливает остальных."""
     if client_id is not None:
         client = clients_service.get_live_client_or_404(db, client_id)
-        targets = [client]
-    else:
-        targets = list(
-            db.scalars(
-                select(Client).where(Client.archived_at.is_(None), Client.wb_api_key_enc.is_not(None))
-            )
-        )
-
-    results = []
-    for client in targets:
+        wb_client = get_wb_client(client)
         try:
-            wb_client = get_wb_client(client)
             created = orders_service.sync_orders_from_wb(db, client, wb_client)
-            results.append({"clientId": client.id, "clientName": client.name, "created": len(created), "error": None})
-        except AppError as exc:  # WbApiError и ошибки расшифровки ключа — не рушат синк остальных
-            db.rollback()  # недописанное по этому клиенту не должно уехать с коммитом следующего
-            results.append({"clientId": client.id, "clientName": client.name, "created": 0, "error": exc.detail})
+            orders_service.refresh_order_statuses(db, client, wb_client)
+            results = [
+                {"clientId": client.id, "clientName": client.name, "created": len(created), "error": None}
+            ]
+        except AppError as exc:
+            db.rollback()
+            results = [
+                {"clientId": client.id, "clientName": client.name, "created": 0, "error": exc.detail}
+            ]
+    else:
+        results = orders_service.sync_orders(db)
     return {"results": results}
 
 
 @router.get("/orders", response_model=list[OrderOut])
-def list_orders(client_id: int | None = None, db: Session = Depends(get_db)) -> list[Order]:
-    stmt = select(Order).order_by(Order.id.desc())
-    if client_id is not None:
-        stmt = stmt.where(Order.client_id == client_id)
-    return list(db.scalars(stmt))
+def list_orders(
+    client_id: int | None = None, warehouse_id: str | None = None, group: str | None = None,
+    limit: int = 100, offset: int = 0, db: Session = Depends(get_db),
+) -> list[Order]:
+    return orders_service.list_orders(
+        db, client_id=client_id, warehouse_id=warehouse_id, group=group, limit=limit, offset=offset,
+    )
+
+
+@router.get("/orders/counters", response_model=OrderCountersOut)
+def order_counters(client_id: int | None = None, db: Session = Depends(get_db)) -> dict:
+    return orders_service.get_order_counters(db, client_id=client_id)
 
 
 @router.get("/orders/{order_id}", response_model=OrderOut)
@@ -73,6 +80,13 @@ def take_to_work(order_id: int, db: Session = Depends(get_db)) -> Order:
     order = orders_service.get_order_or_404(db, order_id)
     wb_client = get_wb_client(order.client)
     return orders_service.take_to_work(db, order, wb_client)
+
+
+@router.post("/orders/take-to-work-bulk", response_model=list[TakeToWorkBulkResultOut])
+def take_to_work_bulk(body: TakeToWorkBulkRequest, db: Session = Depends(get_db)) -> list[dict]:
+    """Массовое «Взять в работу выбранные» — одна поставка на каждого клиента
+    (Этап 3, п.3.2). Ошибка одного заказа не останавливает остальные."""
+    return orders_service.take_to_work_bulk(db, body.order_ids)
 
 
 @router.get("/orders/{order_id}/pick-list", response_model=list[PickLineOut])

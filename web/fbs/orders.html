@@ -9,17 +9,82 @@
   <style>
     .order-id { font-family: var(--mono); font-size: 18px; color: var(--text); }
     .card-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+    .tabs { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 16px; }
+    .tab-tile {
+      cursor: pointer;
+      border: 1px solid var(--border);
+      min-width: 140px;
+    }
+    .tab-tile:hover { filter: brightness(1.05); }
+    .tab-tile.active { outline: 2px solid var(--blue); }
+    .tab-all {
+      align-self: center;
+      font-family: var(--font-ui);
+      font-weight: 600;
+      font-size: 14px;
+      color: var(--text-2);
+      background: none;
+      border: none;
+      cursor: pointer;
+      padding: 6px 10px;
+    }
+    .tab-all.active { color: var(--blue); text-decoration: underline; }
+    .order-row { display: flex; align-items: flex-start; gap: 12px; width: 100%; }
+    .order-row input[type="checkbox"] { margin-top: 4px; width: 18px; height: 18px; flex: none; }
+    .order-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 10px; }
+    .order-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .item-row { display: flex; align-items: center; gap: 10px; }
+    .item-row + .item-row { margin-top: 6px; }
+    .item-thumb {
+      width: 36px;
+      height: 36px;
+      flex: none;
+      border-radius: var(--radius-xs);
+      border: 1px solid var(--border);
+      object-fit: cover;
+      background: var(--bg2);
+    }
+    .item-text { font-size: 15px; color: var(--text-2); }
+    /* Пагинация — тот же вид, что и в разделе «Товары» (web/products.html). */
+    .pagination-bar { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; margin-top: 16px; }
+    .pagination-bar[hidden] { display: none; }
+    .page-size-group { display: flex; align-items: center; gap: 8px; font-size: 16px; color: var(--text-2); white-space: nowrap; }
+    .page-size-group select.input { width: auto; }
+    .pagination-controls { display: flex; align-items: center; gap: 10px; }
+    .pagination-controls .page-info { font-size: 16px; color: var(--text-2); white-space: nowrap; }
   </style>
 </head>
 <body>
   <div class="page-head">
     <h1 class="page-title">Заказы ФБС</h1>
-    <button class="btn btn-primary" id="btnSync">Синхронизировать заказы</button>
+    <div class="toolbar">
+      <button class="btn" id="btnTakeBulk" disabled>Взять в работу выбранные</button>
+      <button class="btn btn-primary" id="btnSync">Обновить из WB</button>
+    </div>
   </div>
 
   <div id="clientFilterMount" style="margin-bottom:14px;"></div>
 
+  <div class="tabs" id="tabs"></div>
+
   <div id="body">Загрузка…</div>
+
+  <div class="pagination-bar" id="paginationBar" hidden>
+    <label class="page-size-group">
+      Показывать по:
+      <select class="input" id="pageSize">
+        <option value="10">10</option>
+        <option value="20" selected>20</option>
+        <option value="50">50</option>
+        <option value="100">100</option>
+      </select>
+    </label>
+    <div class="pagination-controls">
+      <button class="btn" id="btnPrevPage">← Назад</button>
+      <span class="page-info" id="pageInfo"></span>
+      <button class="btn" id="btnNextPage">Вперёд →</button>
+    </div>
+  </div>
 
   <script src="/js/sidebar.js"></script>
   <script>
@@ -36,64 +101,226 @@
       rejected_no_stock: ['Нет остатка', 'badge-red'],
     };
 
-    async function load() {
-      const body = document.getElementById('body');
+    const TABS = [
+      { key: 'new', label: 'Новые' },
+      { key: 'assembly', label: 'На сборке' },
+      { key: 'packed', label: 'Собранные' },
+    ];
+
+    let currentGroup = 'new';
+    const selected = new Set();
+
+    // Пагинация — как в разделе «Товары» (web/products.html): целиком на клиенте,
+    // сервер отдаёт весь отфильтрованный список за раз (лимит выставлен с запасом),
+    // разбивка на страницы только рисует нужный кусок allOrders. Смена вкладки/клиента
+    // сбрасывает currentPage.
+    let allOrders = [];
+    let currentPage = 1;
+    let pageSize = 20;
+
+    function renderTabs(counters) {
+      counters = counters || {};
+      const el = document.getElementById('tabs');
+      el.innerHTML =
+        `<button class="tab-all${currentGroup === null ? ' active' : ''}" id="tabAll">Все</button>` +
+        TABS.map(
+          (t) => `
+        <div class="card stat-card tab-tile${currentGroup === t.key ? ' active' : ''}" data-group="${t.key}">
+          <span class="stat-card__label">${t.label}</span>
+          <span class="stat-card__value">${counters[t.key] || 0}</span>
+        </div>`
+        ).join('');
+      document.getElementById('tabAll').addEventListener('click', () => setGroup(null));
+      el.querySelectorAll('.tab-tile').forEach((tile) =>
+        tile.addEventListener('click', () => setGroup(tile.dataset.group))
+      );
+    }
+
+    function setGroup(group) {
+      currentGroup = group;
+      selected.clear();
+      load();
+    }
+
+    function updateBulkButton() {
+      const btn = document.getElementById('btnTakeBulk');
+      btn.disabled = selected.size === 0;
+      btn.textContent = selected.size
+        ? `Взять в работу выбранные (${selected.size})`
+        : 'Взять в работу выбранные';
+    }
+
+    function itemRowHtml(it) {
+      const thumb = it.productImageUrl
+        ? `<img class="item-thumb" src="${Fulfil.esc(Fulfil.thumb(it.productImageUrl))}" alt="" />`
+        : '<span class="item-thumb"></span>';
+      const name = it.productName || '(товар не распознан)';
+      const size = it.productSize ? ` · ${Fulfil.esc(it.productSize)}` : '';
+      return `
+        <div class="item-row">
+          ${thumb}
+          <span class="item-text">${Fulfil.esc(name)}${size} × ${it.qty}</span>
+        </div>`;
+    }
+
+    async function loadCounters() {
       try {
         const q = Fulfil.clientFilter.clientId ? `?client_id=${Fulfil.clientFilter.clientId}` : '';
-        const orders = await Fulfil.api('GET', '/fbs/orders' + q);
-        if (!orders.length) {
-          body.innerHTML = '<div class="empty-state">Заказов пока нет — синхронизируйте с WB.</div>';
-          return;
-        }
-        body.innerHTML = orders
-          .map((o) => {
-            const [label, cls] = STATUS_LABELS[o.status] || [o.status, 'badge-muted'];
-            const canTake = o.status === 'new';
-            const canAssemble = o.status === 'confirmed' || o.status === 'in_assembly';
-            const actions =
-              (canTake ? `<button class="btn btn-take" data-id="${o.id}">Взять в работу</button>` : '') +
-              (canAssemble ? `<a class="btn" href="/fbs/picking.html?orderId=${o.id}">Сборка</a>` : '');
-            return `
-          <div class="list-card">
-            <div class="order-id">${Fulfil.esc(o.wbOrderId)}</div>
-            <span class="badge badge-muted">${Fulfil.esc(o.clientName || '')}</span>
-            <span class="badge ${cls}">${label}</span>
-            <div class="list-card__meta">${o.items.length} ${Fulfil.plural(o.items.length, 'позиция', 'позиции', 'позиций')}</div>
-            ${actions ? `<div class="card-actions">${actions}</div>` : ''}
-          </div>`;
-          })
-          .join('');
-
-        document.querySelectorAll('.btn-take').forEach((btn) =>
-          btn.addEventListener('click', () => takeToWork(btn.dataset.id))
-        );
+        const counters = await Fulfil.api('GET', '/fbs/orders/counters' + q);
+        renderTabs(counters);
       } catch (err) {
+        renderTabs({});
+      }
+    }
+
+    async function load() {
+      loadCounters();
+      const body = document.getElementById('body');
+      try {
+        const params = new URLSearchParams();
+        if (Fulfil.clientFilter.clientId) params.set('client_id', Fulfil.clientFilter.clientId);
+        if (currentGroup) params.set('group', currentGroup);
+        // Лимит с запасом, чтобы получить весь список вкладки за раз — постранично
+        // режем уже на клиенте, как и каталог товаров.
+        params.set('limit', '1000');
+        allOrders = await Fulfil.api('GET', '/fbs/orders?' + params.toString());
+        currentPage = 1;
+        renderPage();
+      } catch (err) {
+        document.getElementById('paginationBar').hidden = true;
         body.innerHTML = `<div class="empty-state">${Fulfil.esc(Fulfil.errorText(err))}</div>`;
       }
     }
 
+    function renderPage() {
+      const body = document.getElementById('body');
+      const paginationBar = document.getElementById('paginationBar');
+      if (!allOrders.length) {
+        paginationBar.hidden = true;
+        body.innerHTML = '<div class="empty-state">Заказов в этой вкладке нет.</div>';
+        updateBulkButton();
+        return;
+      }
+
+      const totalPages = Math.max(1, Math.ceil(allOrders.length / pageSize));
+      if (currentPage > totalPages) currentPage = totalPages;
+      const start = (currentPage - 1) * pageSize;
+      const orders = allOrders.slice(start, start + pageSize);
+
+      body.innerHTML = orders
+        .map((o) => {
+          const [label, cls] = STATUS_LABELS[o.status] || [o.status, 'badge-muted'];
+          const canTake = o.status === 'new' && !o.problem;
+          const canAssemble = o.status === 'confirmed' || o.status === 'in_assembly';
+          const actions =
+            (canTake ? `<button class="btn btn-take" data-id="${o.id}">Взять в работу</button>` : '') +
+            (canAssemble ? `<a class="btn" href="/fbs/picking.html?orderId=${o.id}">Сборка</a>` : '');
+          return `
+          <div class="list-card">
+            <div class="order-row">
+              ${
+                o.status === 'new'
+                  ? `<input type="checkbox" class="chk-order" data-id="${o.id}" ${o.problem ? 'disabled' : ''} ${selected.has(o.id) ? 'checked' : ''} />`
+                  : '<span style="width:18px;flex:none;"></span>'
+              }
+              <div class="order-body">
+                <div class="order-head">
+                  <div class="order-id">${Fulfil.esc(o.wbOrderId)}</div>
+                  <span class="badge badge-muted">${Fulfil.esc(o.clientName || '')}</span>
+                  <span class="badge ${cls}">${label}</span>
+                  ${o.problem ? '<span class="badge badge-red">Неизвестный товар</span>' : ''}
+                </div>
+                ${o.items.map(itemRowHtml).join('')}
+                ${actions ? `<div class="card-actions">${actions}</div>` : ''}
+              </div>
+            </div>
+          </div>`;
+        })
+        .join('');
+
+      document.querySelectorAll('.btn-take').forEach((btn) =>
+        btn.addEventListener('click', () => takeToWork(Number(btn.dataset.id)))
+      );
+      document.querySelectorAll('.chk-order').forEach((chk) =>
+        chk.addEventListener('change', () => {
+          const id = Number(chk.dataset.id);
+          if (chk.checked) selected.add(id);
+          else selected.delete(id);
+          updateBulkButton();
+        })
+      );
+      updateBulkButton();
+
+      paginationBar.hidden = false;
+      document.getElementById('pageInfo').textContent =
+        `${start + 1}–${Math.min(start + pageSize, allOrders.length)} из ${allOrders.length} (стр. ${currentPage} из ${totalPages})`;
+      document.getElementById('btnPrevPage').disabled = currentPage <= 1;
+      document.getElementById('btnNextPage').disabled = currentPage >= totalPages;
+    }
+
+    document.getElementById('pageSize').addEventListener('change', (e) => {
+      pageSize = Number(e.target.value);
+      currentPage = 1;
+      renderPage();
+    });
+    document.getElementById('btnPrevPage').addEventListener('click', () => {
+      if (currentPage > 1) {
+        currentPage--;
+        renderPage();
+      }
+    });
+    document.getElementById('btnNextPage').addEventListener('click', () => {
+      const totalPages = Math.max(1, Math.ceil(allOrders.length / pageSize));
+      if (currentPage < totalPages) {
+        currentPage++;
+        renderPage();
+      }
+    });
+
     async function takeToWork(orderId) {
       // «Взять в работу» необратимо на стороне WB — обязательное предупреждение перед вызовом.
       const ok = confirm(
-        'Заказ будет подтверждён на Wildberries. Покупатель больше не сможет его отменить, ' +
-          'и обратной операции у WB нет. Продолжить?'
+        'Заказ будет подтверждён на Wildberries (добавлен в поставку). Покупатель больше не сможет ' +
+          'его отменить, и обратной операции у WB нет. Продолжить?'
       );
       if (!ok) return;
       try {
         await Fulfil.api('POST', `/fbs/orders/${orderId}/take-to-work`);
         Fulfil.toast('Заказ взят в работу');
+        selected.delete(orderId);
         load();
       } catch (err) {
         Fulfil.toast(Fulfil.errorText(err), 'error');
       }
     }
 
+    document.getElementById('btnTakeBulk').addEventListener('click', async () => {
+      if (!selected.size) return;
+      const ok = confirm(
+        `${selected.size} заказ(ов) будут подтверждены на Wildberries. Обратной операции у WB нет. Продолжить?`
+      );
+      if (!ok) return;
+      try {
+        const results = await Fulfil.api('POST', '/fbs/orders/take-to-work-bulk', {
+          orderIds: Array.from(selected),
+        });
+        const ok_ = results.filter((r) => r.ok).length;
+        const failed = results.filter((r) => !r.ok);
+        Fulfil.toast(`Взято в работу: ${ok_}${failed.length ? `, ошибок: ${failed.length}` : ''}`, failed.length ? 'error' : 'success');
+        failed.forEach((r) => Fulfil.toast(`Заказ #${r.orderId}: ${r.error}`, 'error'));
+        selected.clear();
+        load();
+      } catch (err) {
+        Fulfil.toast(Fulfil.errorText(err), 'error');
+      }
+    });
+
     document.getElementById('btnSync').addEventListener('click', async () => {
       try {
         const clientId = Fulfil.clientFilter.clientId;
         const res = await Fulfil.api('POST', '/fbs/orders/sync' + (clientId ? `?client_id=${clientId}` : ''));
         if (!res.results.length) {
-          Fulfil.toast('Нет клиентов с заданным ключом API для синхронизации', 'error');
+          Fulfil.toast('Нет клиентов с ключом API и выбранным складом для синхронизации', 'error');
         } else {
           res.results.forEach((r) => {
             const msg = r.error ? `${r.clientName}: ошибка — ${r.error}` : `${r.clientName}: новых заказов ${r.created}`;
@@ -106,7 +333,10 @@
       }
     });
 
-    Fulfil.clientFilter.mount(document.getElementById('clientFilterMount'), load).then(load);
+    Fulfil.clientFilter.mount(document.getElementById('clientFilterMount'), () => {
+      selected.clear();
+      load();
+    }).then(load);
   </script>
 </body>
 </html>

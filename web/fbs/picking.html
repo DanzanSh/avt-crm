@@ -32,6 +32,14 @@
     .order-id { font-family: var(--mono); font-size: 18px; color: var(--text); }
     #orderPicker .list-card { text-decoration: none; }
     #orderPicker .empty-state a.btn { margin-top: 12px; }
+    .cancelled-banner {
+      padding: 14px 16px;
+      border-radius: var(--radius);
+      background: var(--red-soft);
+      color: var(--red);
+      font-weight: 700;
+      margin-bottom: 16px;
+    }
   </style>
 </head>
 <body>
@@ -44,6 +52,9 @@
 
   <!-- Детали сборки конкретного заказа: показываются только при заданном orderId. -->
   <div id="orderDetails" hidden>
+    <div id="cancelledBanner" class="cancelled-banner" hidden>
+      Заказ отменён на Wildberries — верните товар в ячейку по листу подбора ниже, сборка невозможна.
+    </div>
     <div class="page-sub">Соберите товар по маршруту, отсканируйте марки «Честный знак», подтвердите сборку.</div>
 
     <div class="card section">
@@ -100,6 +111,13 @@
         sel.innerHTML = order.items
           .map((it) => `<option value="${it.id}">${Fulfil.esc(it.barcode)} × ${it.qty}</option>`)
           .join('');
+        // Заказ мог быть отменён покупателем между открытием листа подбора и
+        // сборкой (Этап 3, п.3.1: refresh_order_statuses теперь это видит) —
+        // сборщик должен вернуть товар в ячейку, а не продолжать собирать отменённое.
+        const cancelled = order.status === 'cancelled';
+        document.getElementById('cancelledBanner').hidden = !cancelled;
+        document.getElementById('markInput').disabled = cancelled;
+        document.getElementById('btnConfirm').disabled = cancelled;
       } catch (err) {
         Fulfil.toast(Fulfil.errorText(err), 'error');
       }

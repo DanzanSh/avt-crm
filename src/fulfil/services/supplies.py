@@ -9,11 +9,11 @@ from sqlalchemy.orm import Session
 from fulfil.errors import AppError
 from fulfil.integrations.wb.base import WBClient
 from fulfil.models.client import Client
-from fulfil.models.fbs import Order, Supply, SupplyBox, SupplyStatus
+from fulfil.models.fbs import Order, OrderStatus, Supply, SupplyBox, SupplyStatus
 
 
-def create_supply(db: Session, client: Client, wb_client: WBClient) -> Supply:
-    wb_supply_id = wb_client.create_supply()
+def create_supply(db: Session, client: Client, wb_client: WBClient, *, name: str | None = None) -> Supply:
+    wb_supply_id = wb_client.create_supply(name)
     supply = Supply(client_id=client.id, wb_supply_id=wb_supply_id, status=SupplyStatus.OPEN)
     db.add(supply)
     db.commit()
@@ -36,9 +36,12 @@ def add_order_to_supply(db: Session, supply: Supply, order: Order, wb_client: WB
         )
     wb_client.add_order_to_supply(supply.wb_supply_id, order.wb_order_id)
     order.supply_id = supply.id
-    from fulfil.models.fbs import OrderStatus
-
-    order.status = OrderStatus.IN_SUPPLY
+    if order.status == OrderStatus.NEW:
+        # Добавление в поставку — это и есть подтверждение заказа на WB (Этап 3,
+        # п.3.2, problems.txt №3): раньше здесь стоял IN_SUPPLY, статус, до которого
+        # в новой модели дело не доходит — подтверждённый заказ идёт в сборку
+        # (CONFIRMED/IN_ASSEMBLY -> confirm-assembly -> PACKED), а не «в поставку».
+        order.status = OrderStatus.CONFIRMED
     db.commit()
 
 

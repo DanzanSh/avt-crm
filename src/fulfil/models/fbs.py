@@ -36,6 +36,20 @@ class Order(Base):
     wb_order_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     wb_supply_id: Mapped[str | None] = mapped_column(String(64), index=True)
     supply_id: Mapped[int | None] = mapped_column(ForeignKey("supplies.id"), index=True)
+    # Склад WB, на который пришёл заказ (Этап 3 плана №3, п.3.1/4.1 problems.txt) —
+    # синхронизация берёт ТОЛЬКО заказы с warehouseId == client.wb_warehouse_id,
+    # чужие склады продавца в базу вообще не попадают.
+    wb_warehouse_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    wb_nm_id: Mapped[int | None] = mapped_column(index=True)
+    wb_chrt_id: Mapped[int | None]
+    article: Mapped[str | None] = mapped_column(String(128))
+    # Статусы самого WB (см. POST /api/v3/orders/status) — опрашиваются отдельно от
+    # /orders/new, иначе отмена покупателем/доставка/приёмка до нас не доходят.
+    wb_status: Mapped[str | None] = mapped_column(String(32))
+    supplier_status: Mapped[str | None] = mapped_column(String(32))
+    # 'unknown_sku' — позиция не нашла товар даже после пересинхронизации карточек
+    # клиента; заказ сохраняется (а не теряется молча), но взять его в работу нельзя.
+    problem: Mapped[str | None] = mapped_column(String(32), index=True)
     deadline_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     status: Mapped[OrderStatus] = mapped_column(default=OrderStatus.NEW, index=True)
     created_at_wb: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
@@ -58,7 +72,10 @@ class OrderItem(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     order_id: Mapped[int] = mapped_column(ForeignKey("orders.id", ondelete="CASCADE"))
-    product_id: Mapped[int] = mapped_column(ForeignKey("products.id"))
+    # Nullable (Этап 3 плана №3, п.3.1): позиция с нераспознанным баркодом всё равно
+    # сохраняется — заказ помечается Order.problem='unknown_sku' вместо того, чтобы
+    # тихо потерять строку (раньше _find_product()==None просто пропускал item).
+    product_id: Mapped[int | None] = mapped_column(ForeignKey("products.id"))
     barcode: Mapped[str] = mapped_column(String(64))
     qty: Mapped[int]
     picked_qty: Mapped[int] = mapped_column(default=0)
@@ -69,9 +86,22 @@ class OrderItem(Base):
     sticker_type: Mapped[str | None] = mapped_column(String(16))
 
     order: Mapped[Order] = relationship(back_populates="items")
+    product: Mapped["Product | None"] = relationship()
     marks: Mapped[list["OrderItemMark"]] = relationship(
         back_populates="order_item", cascade="all, delete-orphan"
     )
+
+    @property
+    def product_name(self) -> str | None:
+        return self.product.name if self.product is not None else None
+
+    @property
+    def product_size(self) -> str | None:
+        return self.product.size if self.product is not None else None
+
+    @property
+    def product_image_url(self) -> str | None:
+        return self.product.image_url if self.product is not None else None
 
 
 class OrderItemMark(Base):

@@ -59,6 +59,25 @@
     }
     .sb-link:hover { background: var(--row-hover); }
     .sb-link.active { color: var(--blue); background: var(--blue-soft); font-weight: 700; }
+    .sb-link { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .sb-badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 20px;
+      height: 20px;
+      padding: 0 6px;
+      border-radius: 10px;
+      background: var(--red);
+      color: #fff;
+      font-size: 12px;
+      font-weight: 700;
+      line-height: 20px;
+    }
+    /* Специфичность .sb-badge (display: inline-flex) равна встроенному правилу
+     * [hidden] { display: none } — без явного override badge.hidden=true не
+     * скрывал бы бейдж вообще (проверено вручную в браузере на «Заказы ФБС»). */
+    .sb-badge[hidden] { display: none; }
     .sb-logout {
       margin-top: auto;
       padding: 11px 14px;
@@ -117,6 +136,10 @@
   document.getElementById('sbLogout').addEventListener('click', () => Fulfil.logout());
 
   // ── Ссылки: дорисовываются между шапкой и «Выйти», когда придёт карта ─
+  // Страницы со счётчиком (Этап 3, п.3.4) получают бейдж-пузырёк с текущим
+  // значением из GET /fbs/orders/counters — обновляется каждые 60 секунд.
+  const counterEls = {}; // { counterKey: [<span>, ...] }
+
   function fillLinks(pages) {
     const logout = document.getElementById('sbLogout');
     nav.querySelectorAll('.sb-link').forEach((el) => el.remove());
@@ -124,9 +147,38 @@
       const a = document.createElement('a');
       a.className = 'sb-link' + (location.pathname === p.href ? ' active' : '');
       a.href = p.href;
-      a.textContent = p.label;
+      const label = document.createElement('span');
+      label.textContent = p.label;
+      a.appendChild(label);
+      if (p.counter) {
+        const badge = document.createElement('span');
+        badge.className = 'sb-badge';
+        badge.hidden = true;
+        a.appendChild(badge);
+        (counterEls[p.counter] = counterEls[p.counter] || []).push(badge);
+      }
       nav.insertBefore(a, logout);
     });
+    if (Object.keys(counterEls).length) {
+      refreshCounters();
+      setInterval(refreshCounters, 60000);
+    }
+  }
+
+  function refreshCounters() {
+    Fulfil.api('GET', '/fbs/orders/counters')
+      .then((counters) => {
+        Object.keys(counterEls).forEach((key) => {
+          const n = counters[key] || 0;
+          counterEls[key].forEach((badge) => {
+            badge.hidden = !n;
+            badge.textContent = n > 99 ? '99+' : String(n);
+          });
+        });
+      })
+      .catch(() => {
+        /* сайдбар не должен ломаться из-за недоступного счётчика */
+      });
   }
 
   Fulfil.requireAuth();

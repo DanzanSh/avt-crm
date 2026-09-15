@@ -35,9 +35,18 @@ class WbCardsPage(TypedDict):
 class WbOrder(TypedDict):
     orderId: str
     supplyId: str | None
+    warehouseId: str | None  # склад WB, куда пришёл заказ — фильтр "только наш склад" (Этап 3, п.4.2)
+    nmId: int | None
+    chrtId: int | None
+    article: str | None
     createdAt: str  # ISO-8601 с TZ
     deadlineAt: str | None
     items: list[dict]  # [{barcode, qty}]
+
+
+class WbOrderStatus(TypedDict):
+    wbStatus: str | None
+    supplierStatus: str | None
 
 
 class WbOffice(TypedDict):
@@ -90,11 +99,17 @@ class WBClient(Protocol):
 
     def get_new_orders(self) -> list[WbOrder]: ...
 
+    def get_order_statuses(self, order_ids: list[str]) -> dict[str, WbOrderStatus]:
+        """Статусы НАШИХ заказов (Этап 3, п.3.1) — POST /api/v3/orders/status.
+        Опрашивается отдельно от get_new_orders(): иначе отмена покупателем,
+        «в доставке», «принята» до нас не доходят."""
+        ...
+
     def get_order_sticker(self, order_id: str) -> WbSticker: ...
 
     def send_marking_codes(self, order_id: str, codes: list[str]) -> dict: ...
 
-    def create_supply(self) -> str:
+    def create_supply(self, name: str | None = None) -> str:
         """Возвращает wb_supply_id."""
         ...
 

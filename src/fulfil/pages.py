@@ -15,6 +15,9 @@ class PageDef:
     href: str
     label: str
     section: str
+    # Ключ из GET /fbs/orders/counters, чей счётчик рисуется бейджем в сайдбаре
+    # (Этап 3, п.3.4) — None (по умолчанию) значит "без бейджа".
+    counter: str | None = None
 
 
 PAGES: list[PageDef] = [
@@ -23,7 +26,7 @@ PAGES: list[PageDef] = [
     PageDef("stock", "/stock.html", "Остатки", "Склад"),
     PageDef("products", "/products.html", "Товары", "Справочники"),
     PageDef("clients", "/clients.html", "Клиенты", "Справочники"),
-    PageDef("orders", "/fbs/orders.html", "Заказы ФБС", "ФБС"),
+    PageDef("orders", "/fbs/orders.html", "Заказы ФБС", "ФБС", counter="new"),
     PageDef("picking", "/fbs/picking.html", "Сборка заказа", "ФБС"),
     PageDef("supplies", "/fbs/supplies.html", "Поставки", "ФБС"),
 ]
