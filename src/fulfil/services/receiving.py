@@ -19,11 +19,13 @@ from sqlalchemy.orm import Session, selectinload
 
 from fulfil.errors import AppError, CellOccupiedError, NotFoundError
 from fulfil.exports.receipt_xlsx import build_template_xlsx, parse_plan_rows
-from fulfil.models.client import Client
+from fulfil.models import audit
+from fulfil.models.client import Client, deleted_client_ids
 from fulfil.models.product import Product
 from fulfil.models.receiving import Receipt, ReceiptLine, ReceiptPlanLine, ReceiptStatus
 from fulfil.models.storage import Cell
 from fulfil.models.stock import MoveReason, StockByCell
+from fulfil.services.clients import get_live_client_or_404
 from fulfil.services.storage import check_placement_allowed, find_free_cell_suggestions, resolve_location
 from fulfil.services.stock import list_stock_by_cell
 from fulfil.services.stock_ledger import apply_move
@@ -103,6 +105,8 @@ def list_receipts(db: Session, *, client_id: int | None = None, group: str | Non
         .options(selectinload(Receipt.client))
         .outerjoin(plan_sub, plan_sub.c.receipt_id == Receipt.id)
         .outerjoin(accepted_sub, accepted_sub.c.receipt_id == Receipt.id)
+        # удалённый клиент скрыт отовсюду (problems.txt, п.5)
+        .where(Receipt.client_id.not_in(deleted_client_ids()))
         .order_by(Receipt.id.desc())
     )
     if client_id is not None:
@@ -134,7 +138,10 @@ def list_receipts(db: Session, *, client_id: int | None = None, group: str | Non
 
 
 def get_receipt_counters(db: Session, *, client_id: int | None = None) -> dict:
-    stmt = select(Receipt.status, func.count()).select_from(Receipt)
+    stmt = (
+        select(Receipt.status, func.count()).select_from(Receipt)
+        .where(Receipt.client_id.not_in(deleted_client_ids()))
+    )
     if client_id is not None:
         stmt = stmt.where(Receipt.client_id == client_id)
     counts = dict(db.execute(stmt.group_by(Receipt.status)).all())
@@ -181,14 +188,59 @@ def create_receipt(
     )
 
 
-def update_receipt(
-    db: Session, receipt: Receipt, *, expected_date: dt.date | None, comment: str | None
-) -> Receipt:
-    receipt.expected_date = expected_date
-    receipt.comment = comment
+def update_receipt(db: Session, receipt: Receipt, *, changes: dict, actor: str) -> Receipt:
+    """Частичное изменение шапки: changes — только переданные поля
+    (expected_date / comment / client_id), остальные не трогаем.
+
+    Смена клиента (problems.txt, п.3) — только в «Ожидается»: товары плана
+    принадлежат старому клиенту, поэтому план очищается целиком."""
+    audit_changes: dict = {}
+    if changes.get("client_id") is not None and changes["client_id"] != receipt.client_id:
+        _require_draft(receipt)
+        new_client = get_live_client_or_404(db, changes["client_id"])
+        old_name = receipt.client_name
+        plan_cleared = bool(receipt.plan_lines)
+        receipt.plan_lines.clear()
+        receipt.client_id = new_client.id
+        receipt.client = new_client
+        audit_changes["client"] = [old_name, new_client.name]
+        if plan_cleared:
+            audit_changes["planCleared"] = True
+    for field in ("expected_date", "comment"):
+        if field in changes and changes[field] != getattr(receipt, field):
+            old, new = getattr(receipt, field), changes[field]
+            setattr(receipt, field, new)
+            # changes — JSON-колонка: дату сериализуем строкой
+            audit_changes[field] = [None if v is None else str(v) for v in (old, new)]
+    if audit_changes:
+        audit.record(
+            db, entity_type="receipt", entity_id=receipt.id, action="update", actor=actor,
+            changes=audit_changes,
+        )
     db.commit()
     db.refresh(receipt)
     return receipt
+
+
+def delete_receipt(db: Session, receipt: Receipt, actor: str) -> None:
+    """Удаление ошибочно созданной приёмки (problems.txt, п.3). Можно, пока по ней
+    ничего не принято: в «Ожидается» всегда, в «В работе» — без строк приёмки.
+    Физическое удаление: принятого товара нет, значит нет и движений остатка,
+    которые ссылались бы на приёмку; план уходит каскадом. След — в audit_log."""
+    has_lines = db.scalar(select(ReceiptLine.id).where(ReceiptLine.receipt_id == receipt.id).limit(1))
+    if receipt.status == ReceiptStatus.DONE or has_lines is not None:
+        raise AppError(
+            f"По приёмке {receipt.number} уже принят товар — удалить её нельзя.",
+            status_code=409,
+            reason_code="receipt_has_accepted_lines",
+            what_to_do="Завершите приёмку; лишний товар спишите или переместите в «Остатках».",
+        )
+    audit.record(
+        db, entity_type="receipt", entity_id=receipt.id, action="delete", actor=actor,
+        comment=receipt.number,
+    )
+    db.delete(receipt)
+    db.commit()
 
 
 # --- План приёмки ---

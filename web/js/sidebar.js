@@ -92,6 +92,8 @@
       cursor: pointer;
     }
     .sb-logout:hover { background: var(--red); color: #fff; }
+    .sb-user { margin-top: auto; font-size: 14px; color: var(--muted); }
+    .sb-user + .sb-logout { margin-top: 0; }
     .sb-content { flex: 1; min-width: 0; padding: 28px; overflow: auto; }
     @media (max-width: 768px) {
       body { flex-direction: column; }
@@ -107,6 +109,7 @@
       }
       .sb-brand-name { display: none; }
       .sb-logout { margin-top: 0; padding: 8px 12px; }
+      .sb-user { display: none; }
       .sb-link { margin: 0; white-space: nowrap; }
       .sb-content { padding: 16px; }
     }
@@ -182,7 +185,20 @@
   }
 
   Fulfil.requireAuth();
-  Fulfil.api('GET', '/settings/pages')
-    .then(fillLinks)
+  // Страницы с roles (например, «Пользователи») видны только этим ролям — ссылка
+  // иначе вела бы в 403. Не получили роль — показываем только общие страницы.
+  const mePromise = typeof Fulfil.me === 'function' ? Fulfil.me().catch(() => null) : Promise.resolve(null);
+  Promise.all([Fulfil.api('GET', '/settings/pages'), mePromise])
+    .then(([pages, user]) => {
+      fillLinks(pages.filter((p) => !p.roles || (user && p.roles.includes(user.role))));
+      if (user) showUser(user);
+    })
     .catch(() => fillLinks([]));
+
+  function showUser(user) {
+    const el = document.createElement('div');
+    el.className = 'sb-user';
+    el.textContent = (user.fullName || user.login) + ' · ' + (Fulfil.ROLE_LABELS[user.role] || user.role);
+    nav.insertBefore(el, document.getElementById('sbLogout'));
+  }
 })();

@@ -47,6 +47,10 @@
       <label class="archived-toggle">
         <input type="checkbox" id="showArchived" /> показать архивных
       </label>
+      <!-- Удалённых видит только владелец (problems.txt, п.5) — чекбокс показывается по роли. -->
+      <label class="archived-toggle" id="deletedToggle" hidden>
+        <input type="checkbox" id="showDeleted" /> показать удалённых
+      </label>
     </div>
   </div>
 
@@ -63,6 +67,8 @@
   <script src="/js/sidebar.js"></script>
   <script>
     let showArchived = false;
+    let showDeleted = false;
+    let isHost = false;
 
     function fmtDate(iso) {
       if (!iso) return '';
@@ -83,8 +89,8 @@
     async function load() {
       const body = document.getElementById('body');
       try {
-        const q = showArchived ? '?include_archived=true' : '';
-        const clients = await Fulfil.api('GET', '/clients' + q);
+        const state = showDeleted ? 'all' : showArchived ? 'archived' : 'live';
+        const clients = await Fulfil.api('GET', '/clients?state=' + state);
         if (!clients.length) {
           body.innerHTML = '<div class="empty-state">Клиентов пока нет — добавьте первого.</div>';
           return;
@@ -106,17 +112,38 @@
             metaItem('Активных заказов', String(c.activeOrders));
             metaItem('Последняя синхронизация', c.lastSyncAt ? fmtDate(c.lastSyncAt) : 'ещё не было');
 
-            const actions = c.archivedAt
-              ? `<button class="btn btn-restore" data-id="${c.id}">Восстановить</button>`
-              : `<button class="btn btn-edit" data-id="${c.id}">Изменить</button>
+            if (c.deletedAt) {
+              metaItem('Удалён', fmtDate(c.deletedAt) + (c.deletedBy ? ' · ' + c.deletedBy : ''));
+            }
+
+            // Вернуть из архива и удалить может только владелец (problems.txt, п.5) —
+            // у сотрудника на архивной карточке кнопок нет вовсе.
+            const hostDelete = isHost ? `<button class="btn btn-danger" data-delete="${c.id}">Удалить</button>` : '';
+            let actions;
+            if (c.deletedAt) {
+              actions = `<button class="btn btn-restore" data-id="${c.id}">Восстановить</button>
+                 <button class="btn btn-danger" data-purge="${c.id}">Удалить безвозвратно</button>`;
+            } else if (c.archivedAt) {
+              actions = isHost
+                ? `<button class="btn btn-restore" data-id="${c.id}">Восстановить</button>${hostDelete}`
+                : '<span class="key-missing">Вернуть из архива может только владелец</span>';
+            } else {
+              actions = `<button class="btn btn-edit" data-id="${c.id}">Изменить</button>
                  <button class="btn" data-warehouse="${c.id}">Склад WB</button>
                  <button class="btn" data-check="${c.id}">Проверить подключение</button>
-                 <button class="btn btn-danger" data-archive="${c.id}">Архивировать</button>`;
+                 <button class="btn btn-danger" data-archive="${c.id}">Архивировать</button>
+                 ${hostDelete}`;
+            }
+            const badge = c.deletedAt
+              ? ' <span class="badge badge-red">удалён</span>'
+              : c.archivedAt
+              ? ' <span class="badge badge-muted">архив</span>'
+              : '';
 
             return `
           <div class="card client-card ${c.archivedAt ? 'archived-row' : ''}" data-id="${c.id}">
             <div class="client-card__head">
-              <div class="client-name">${Fulfil.esc(c.name)}${c.archivedAt ? ' <span class="badge badge-muted">архив</span>' : ''}</div>
+              <div class="client-name">${Fulfil.esc(c.name)}${badge}</div>
               <div>${keyStatusHtml(c)}</div>
             </div>
             <div class="client-meta">${meta.join('')}</div>
@@ -138,6 +165,12 @@
         );
         document.querySelectorAll('[data-archive]').forEach((btn) =>
           btn.addEventListener('click', () => archiveClient(btn.dataset.archive))
+        );
+        document.querySelectorAll('[data-delete]').forEach((btn) =>
+          btn.addEventListener('click', () => deleteClient(clients.find((c) => c.id === Number(btn.dataset.delete))))
+        );
+        document.querySelectorAll('[data-purge]').forEach((btn) =>
+          btn.addEventListener('click', () => purgeClient(clients.find((c) => c.id === Number(btn.dataset.purge))))
         );
         document.querySelectorAll('.btn-restore').forEach((btn) =>
           btn.addEventListener('click', async () => {
@@ -173,6 +206,40 @@
       try {
         await Fulfil.api('DELETE', `/clients/${id}`);
         Fulfil.toast('Клиент архивирован');
+        load();
+      } catch (err) {
+        Fulfil.toast(Fulfil.errorText(err), 'error');
+      }
+    }
+
+    async function deleteClient(client) {
+      if (!confirm(`Удалить клиента «${client.name}»? Сотрудники перестанут его видеть и не смогут вернуть. История приёмок и движений сохранится; восстановить может только владелец.`)) return;
+      try {
+        await Fulfil.api('POST', `/clients/${client.id}/delete`);
+        Fulfil.toast('Клиент удалён');
+        load();
+      } catch (err) {
+        Fulfil.toast(Fulfil.errorText(err), 'error');
+      }
+    }
+
+    // Необратимо — поэтому не confirm(), а ввод наименования клиента.
+    async function purgeClient(client) {
+      const values = await Fulfil.formModal({
+        title: 'Удалить безвозвратно',
+        submitLabel: 'Удалить навсегда',
+        fields: [
+          {
+            id: 'confirmName', label: 'Введите наименование клиента', type: 'text', required: true,
+            hint: `Обратной операции нет. Для подтверждения введите «${client.name}». Клиента с историей (товары, приёмки, заказы) удалить безвозвратно нельзя.`,
+          },
+        ],
+        onChange: (v, ui) => ui.setSubmitEnabled(v.confirmName.trim() === client.name),
+      });
+      if (!values) return;
+      try {
+        await Fulfil.api('DELETE', `/clients/${client.id}/purge`);
+        Fulfil.toast('Клиент удалён безвозвратно');
         load();
       } catch (err) {
         Fulfil.toast(Fulfil.errorText(err), 'error');
@@ -360,8 +427,18 @@
       showArchived = e.target.checked;
       load();
     });
+    document.getElementById('showDeleted').addEventListener('change', (e) => {
+      showDeleted = e.target.checked;
+      load();
+    });
 
-    load();
+    (typeof Fulfil.me === 'function' ? Fulfil.me() : Promise.reject(null))
+      .then((user) => {
+        isHost = user.role === 'host';
+        document.getElementById('deletedToggle').hidden = !isHost;
+      })
+      .catch(() => {})
+      .finally(load);
   </script>
 </body>
 </html>

@@ -149,6 +149,15 @@
     .cell-contents th, .cell-receipts th { font-size: 12px; padding: 6px 10px; }
     .cell-contents .num, .cell-receipts .num { text-align: right; font-variant-numeric: tabular-nums; }
     .cell-empty-row { color: var(--muted); }
+
+    /* Допустимые баркоды места — чипы с крестиком удаления (problems.txt, п.1). */
+    .allowed-list { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0; }
+    .allowed-chip { font-family: var(--mono); font-size: 12px; display: inline-flex; align-items: center; gap: 4px; }
+    .allowed-chip button {
+      border: 0; background: none; color: inherit; cursor: pointer;
+      font-size: 14px; line-height: 1; padding: 0 2px; opacity: .6;
+    }
+    .allowed-chip button:hover { opacity: 1; }
   </style>
 </head>
 <body>
@@ -988,8 +997,16 @@
         </table>
         ${receiptsBlock}
         <div style="margin-top:12px; font-weight:600;">Допустимые баркоды</div>
-        <div id="allowedList" style="font-family:var(--mono); font-size:12px; margin:6px 0;">
-          ${cell.allowedBarcodes.length ? cell.allowedBarcodes.map((b) => Fulfil.esc(b)).join(', ') : '<span style="color:var(--muted)">любой товар (допуск не настроен)</span>'}
+        <div id="allowedList" class="allowed-list">
+          ${
+            cell.allowedBarcodes.length
+              ? cell.allowedBarcodes
+                  .map(
+                    (b) => `<span class="badge badge-blue allowed-chip">${Fulfil.esc(b)}<button type="button" data-role="allowed-remove" data-barcode="${Fulfil.esc(b)}" title="Убрать из допуска" aria-label="Убрать ${Fulfil.esc(b)} из допуска">×</button></span>`
+                  )
+                  .join('')
+              : '<span style="color:var(--muted); font-size:12px;">любой товар (допуск не настроен)</span>'
+          }
         </div>
         <div class="field-row">
           <input class="input" id="newAllowedBarcode" placeholder="Добавить баркод" />
@@ -1018,6 +1035,20 @@
           Fulfil.toast(Fulfil.errorText(err), 'error');
         }
       });
+
+      document.querySelectorAll('[data-role="allowed-remove"]').forEach((btn) =>
+        btn.addEventListener('click', async () => {
+          try {
+            await Fulfil.api(
+              'DELETE',
+              `/storage/cells/${cell.id}/allowed-barcodes/${encodeURIComponent(btn.dataset.barcode)}`
+            );
+            openCellDetail(cell.id);
+          } catch (err) {
+            Fulfil.toast(Fulfil.errorText(err), 'error');
+          }
+        })
+      );
 
       const blockBtn = document.getElementById('btnBlock');
       if (blockBtn) {

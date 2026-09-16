@@ -12,8 +12,11 @@ class CreateReceiptRequest(CamelModel):
 
 
 class UpdateReceiptRequest(CamelModel):
+    """Частичный PATCH: сервис получает model_dump(exclude_unset=True), поэтому
+    непереданное поле не затирается. client_id — только в «Ожидается», план очищается."""
     expected_date: dt.date | None = None
     comment: str | None = None
+    client_id: int | None = None
 
 
 class PlanLineIn(CamelModel):

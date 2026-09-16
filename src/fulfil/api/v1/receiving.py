@@ -94,12 +94,22 @@ def get_receipt(receipt_id: int, db: Session = Depends(get_db)) -> dict:
 
 
 @router.patch("/{receipt_id}", response_model=ReceiptOut)
-def update_receipt(receipt_id: int, body: UpdateReceiptRequest, db: Session = Depends(get_db)) -> dict:
+def update_receipt(
+    receipt_id: int, body: UpdateReceiptRequest, db: Session = Depends(get_db),
+    user: dict = Depends(get_current_user),
+) -> dict:
     receipt = _get_receipt(db, receipt_id)
     receipt = receiving_service.update_receipt(
-        db, receipt, expected_date=body.expected_date, comment=body.comment
+        db, receipt, changes=body.model_dump(exclude_unset=True), actor=_actor(user)
     )
     return receiving_service.receipt_out(db, receipt)
+
+
+@router.delete("/{receipt_id}")
+def delete_receipt(receipt_id: int, db: Session = Depends(get_db), user: dict = Depends(get_current_user)) -> dict:
+    receipt = _get_receipt(db, receipt_id)
+    receiving_service.delete_receipt(db, receipt, actor=_actor(user))
+    return {"ok": True}
 
 
 @router.get("/{receipt_id}/plan", response_model=list[PlanLineOut])

@@ -1,6 +1,6 @@
 import datetime as dt
 
-from sqlalchemy import ForeignKey, Index, JSON, String, DateTime, func, text
+from sqlalchemy import BigInteger, ForeignKey, Index, JSON, String, DateTime, func, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from fulfil.db import Base
@@ -24,11 +24,13 @@ class Product(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     client_id: Mapped[int] = mapped_column(ForeignKey("clients.id"), index=True)
-    wb_nm_id: Mapped[int | None] = mapped_column(index=True)
-    wb_imt_id: Mapped[int | None] = mapped_column(index=True)
+    # Идентификаторы WB — BIGINT: chrtID уже перерос INTEGER (2222347681 > 2^31-1,
+    # боевой кабинет падал 500 на синхронизации), nmID/imtID растут туда же.
+    wb_nm_id: Mapped[int | None] = mapped_column(BigInteger, index=True)
+    wb_imt_id: Mapped[int | None] = mapped_column(BigInteger, index=True)
     # Идентификатор размера карточки WB — от него зависит upsert (см. services/products.py
     # _upsert_card): один nmId/imtId может дать несколько товаров, по одному на chrtId.
-    wb_chrt_id: Mapped[int | None] = mapped_column(index=True)
+    wb_chrt_id: Mapped[int | None] = mapped_column(BigInteger, index=True)
     vendor_code: Mapped[str | None] = mapped_column(String(128))
     barcode: Mapped[str] = mapped_column(String(64), index=True)
     name: Mapped[str] = mapped_column(String(512))
@@ -64,3 +66,9 @@ class Product(Base):
         # Для ProductOut.model_validate(..., from_attributes=True) — читает по имени
         # поля. Списки должны eager-load'ить .client (selectinload), иначе N+1.
         return self.client.name if self.client is not None else None
+
+    @property
+    def client_archived(self) -> bool:
+        # Товар клиента в архиве виден только с «показать архивные» (problems.txt, п.2)
+        # и помечается отдельным бейджем — его архивом управляет клиент, не товар.
+        return self.client is not None and self.client.archived_at is not None

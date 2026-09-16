@@ -56,3 +56,38 @@ def seller(db):
     Supply/Receipt теперь требуют client_id (Этап 1). Названа НЕ `client`, чтобы
     не путать с fastapi TestClient."""
     return make_client(db, name="Тестовый клиент")
+
+
+def make_user(db, login: str, role: str = "employee", password: str = "secret123", **kwargs):
+    """Учётная запись для тестов авторизации (problems.txt, п.5)."""
+    from fulfil.models.user import User, UserRole
+    from fulfil.passwords import hash_password
+
+    user = User(login=login, full_name=login, role=UserRole(role), password_hash=hash_password(password), **kwargs)
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return user
+
+
+@pytest.fixture()
+def api(db):
+    """Первый HTTP-клиент в тестах: права живут в зависимостях FastAPI, сервисными
+    вызовами их не проверить. Без `with` — lifespan (фоновый синк, сев хоста в
+    боевую SessionLocal) не запускается; get_db подменён на тестовую сессию."""
+    from fastapi.testclient import TestClient
+
+    from fulfil.db import get_db
+    from fulfil.main import app
+
+    app.dependency_overrides[get_db] = lambda: db
+    try:
+        yield TestClient(app)
+    finally:
+        app.dependency_overrides.clear()
+
+
+def auth_headers(user) -> dict:
+    from fulfil.auth import create_access_token
+
+    return {"Authorization": f"Bearer {create_access_token(user)}"}

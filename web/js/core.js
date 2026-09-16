@@ -128,6 +128,17 @@
     return 'idem-' + Date.now() + '-' + Math.random().toString(36).slice(2);
   }
 
+  /** Текущий пользователь {id, login, fullName, role} из GET /auth/me — один запрос
+   * на страницу (промис кешируется). Роль решает только, что показывать: права
+   * проверяет сервер (problems.txt, п.5). */
+  let mePromise = null;
+  function me() {
+    if (!mePromise) mePromise = api('GET', '/auth/me');
+    return mePromise;
+  }
+
+  const ROLE_LABELS = { host: 'Владелец', admin: 'Администратор', employee: 'Сотрудник' };
+
   function requireAuth() {
     if (!getToken()) {
       location.href = '/login.html';
@@ -349,6 +360,6 @@
 
   window.Fulfil = {
     api, getToken, setToken, logout, decodeJwt, esc, toast, errorText, requireAuth, newIdempotencyKey, thumb,
-    plural, formModal, clientFilter,
+    plural, formModal, clientFilter, me, ROLE_LABELS,
   };
 })();

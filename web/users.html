@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Пользователи — Fulfil</title>
+  <link rel="stylesheet" href="/css/theme.css" />
+  <script src="/js/core.js"></script>
+  <style>
+    .field-hint { font-size: 14px; color: var(--muted); margin: -4px 0 2px; }
+    .user-card { display: flex; flex-direction: column; gap: 8px; padding: 18px; }
+    .user-card + .user-card { margin-top: 10px; }
+    .user-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .user-name { font-size: 18px; font-weight: 700; color: var(--text); }
+    .user-meta { display: flex; flex-wrap: wrap; gap: 4px 18px; font-size: 15px; }
+    .user-meta .meta-label { color: var(--muted); }
+    .user-meta .meta-value { color: var(--text-2); font-weight: 600; }
+    .card-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+    .inactive-row { opacity: .55; }
+    .modal { width: 460px; max-height: 85vh; overflow: auto; }
+  </style>
+</head>
+<body>
+  <!-- Учётные записи (problems.txt, п.5). Права проверяет сервер (services/users.py):
+       интерфейс лишь не показывает кнопки, которые всё равно вернут 403. -->
+  <div class="page-head">
+    <h1 class="page-title">Пользователи</h1>
+    <div class="toolbar">
+      <button class="btn btn-primary" id="btnNew" disabled>+ Пользователь</button>
+    </div>
+  </div>
+
+  <div id="body">Загрузка…</div>
+
+  <script src="/js/sidebar.js"></script>
+  <script>
+    let me = null;
+
+    function fmtDateTime(iso) {
+      if (!iso) return '';
+      const d = new Date(iso);
+      if (isNaN(d)) return '';
+      const p = (n) => String(n).padStart(2, '0');
+      return `${p(d.getDate())}.${p(d.getMonth() + 1)}.${d.getFullYear()} ${p(d.getHours())}:${p(d.getMinutes())}`;
+    }
+
+    // Те же правила, что в services/users.py: владельца меняет только он сам,
+    // администраторов — только владелец.
+    function canManage(u) {
+      if (u.role === 'host') return u.id === me.id;
+      if (u.role === 'admin') return me.role === 'host' || u.id === me.id;
+      return true;
+    }
+
+    function roleOptions() {
+      const roles = me.role === 'host' ? ['employee', 'admin'] : ['employee'];
+      return roles.map((r) => ({ value: r, label: Fulfil.ROLE_LABELS[r] }));
+    }
+
+    async function load() {
+      const body = document.getElementById('body');
+      try {
+        const users = await Fulfil.api('GET', '/users');
+        body.innerHTML = users
+          .map((u) => {
+            const manage = canManage(u);
+            const isSelf = u.id === me.id;
+            const actions = !manage
+              ? ''
+              : `<button class="btn" data-edit="${u.id}">Изменить</button>
+                 <button class="btn" data-password="${u.id}">Сменить пароль</button>
+                 ${
+                   u.role === 'host' || isSelf
+                     ? ''
+                     : `<button class="btn" data-toggle="${u.id}">${u.isActive ? 'Заблокировать' : 'Разблокировать'}</button>
+                        <button class="btn btn-danger" data-archive="${u.id}">Удалить</button>`
+                 }`;
+            return `
+          <div class="card user-card ${u.isActive ? '' : 'inactive-row'}">
+            <div class="user-head">
+              <span class="user-name">${Fulfil.esc(u.fullName || u.login)}</span>
+              <span class="badge ${u.role === 'host' ? 'badge-blue' : 'badge-muted'}">${Fulfil.esc(Fulfil.ROLE_LABELS[u.role] || u.role)}</span>
+              ${u.isActive ? '' : '<span class="badge badge-red">заблокирован</span>'}
+              ${isSelf ? '<span class="badge badge-green">это вы</span>' : ''}
+            </div>
+            <div class="user-meta">
+              <span><span class="meta-label">Логин:</span> <span class="meta-value">${Fulfil.esc(u.login)}</span></span>
+              <span><span class="meta-label">Последний вход:</span> <span class="meta-value">${u.lastLoginAt ? fmtDateTime(u.lastLoginAt) : 'ещё не входил'}</span></span>
+              ${u.createdBy ? `<span><span class="meta-label">Создал:</span> <span class="meta-value">${Fulfil.esc(u.createdBy)}</span></span>` : ''}
+            </div>
+            <div class="card-actions">${actions}</div>
+          </div>`;
+          })
+          .join('');
+
+        const byId = (id) => users.find((u) => u.id === Number(id));
+        document.querySelectorAll('[data-edit]').forEach((b) => b.addEventListener('click', () => editUser(byId(b.dataset.edit))));
+        document.querySelectorAll('[data-password]').forEach((b) => b.addEventListener('click', () => changePassword(byId(b.dataset.password))));
+        document.querySelectorAll('[data-toggle]').forEach((b) => b.addEventListener('click', () => toggleActive(byId(b.dataset.toggle))));
+        document.querySelectorAll('[data-archive]').forEach((b) => b.addEventListener('click', () => archiveUser(byId(b.dataset.archive))));
+      } catch (err) {
+        body.innerHTML = `<div class="empty-state">${Fulfil.esc(Fulfil.errorText(err))}</div>`;
+      }
+    }
+
+    async function run(promise, message) {
+      try {
+        await promise;
+        Fulfil.toast(message);
+        load();
+      } catch (err) {
+        Fulfil.toast(Fulfil.errorText(err), 'error');
+      }
+    }
+
+    async function createUser() {
+      const values = await Fulfil.formModal({
+        title: 'Новый пользователь',
+        submitLabel: 'Создать',
+        fields: [
+          { id: 'login', label: 'Логин', type: 'text', required: true },
+          { id: 'fullName', label: 'Имя', type: 'text' },
+          { id: 'role', label: 'Роль', type: 'select', value: 'employee', options: roleOptions() },
+          { id: 'password', label: 'Пароль', type: 'password', required: true, hint: 'Не короче 6 символов. Передайте его сотруднику лично.' },
+        ],
+      });
+      if (!values) return;
+      run(
+        Fulfil.api('POST', '/users', {
+          login: values.login, fullName: values.fullName, role: values.role, password: values.password,
+        }),
+        'Пользователь создан'
+      );
+    }
+
+    async function editUser(u) {
+      const fields = [{ id: 'fullName', label: 'Имя', type: 'text', value: u.fullName }];
+      // Роль владельца и свою собственную роль не меняем.
+      if (u.role !== 'host' && u.id !== me.id) {
+        fields.push({ id: 'role', label: 'Роль', type: 'select', value: u.role, options: roleOptions() });
+      }
+      const values = await Fulfil.formModal({ title: `Изменить — ${u.login}`, submitLabel: 'Сохранить', fields });
+      if (!values) return;
+      const payload = { fullName: values.fullName };
+      if (values.role && values.role !== u.role) payload.role = values.role;
+      run(Fulfil.api('PATCH', `/users/${u.id}`, payload), 'Сохранено');
+    }
+
+    async function changePassword(u) {
+      const values = await Fulfil.formModal({
+        title: `Новый пароль — ${u.login}`,
+        submitLabel: 'Сменить пароль',
+        fields: [{ id: 'password', label: 'Новый пароль', type: 'password', required: true, hint: 'Не короче 6 символов.' }],
+      });
+      if (!values) return;
+      run(Fulfil.api('POST', `/users/${u.id}/password`, { password: values.password }), 'Пароль изменён');
+    }
+
+    function toggleActive(u) {
+      run(
+        Fulfil.api('PATCH', `/users/${u.id}`, { isActive: !u.isActive }),
+        u.isActive ? 'Пользователь заблокирован' : 'Пользователь разблокирован'
+      );
+    }
+
+    function archiveUser(u) {
+      if (!confirm(`Удалить пользователя «${u.login}»? Войти он больше не сможет; его действия в истории сохранятся.`)) return;
+      run(Fulfil.api('DELETE', `/users/${u.id}`), 'Пользователь удалён');
+    }
+
+    document.getElementById('btnNew').addEventListener('click', createUser);
+
+    // Кнопка включается только когда известен текущий пользователь — иначе клик
+    // падал бы на me.role молча. Устаревший core.js без Fulfil.me — понятный текст,
+    // а не вечное «Загрузка…».
+    (typeof Fulfil.me === 'function'
+      ? Fulfil.me()
+      : Promise.reject({ detail: 'Страница устарела — обновите её (Ctrl+F5).' }))
+      .then((user) => {
+        me = user;
+        document.getElementById('btnNew').disabled = false;
+        if (user.role !== 'host' && user.role !== 'admin') {
+          document.getElementById('btnNew').style.display = 'none'; // .btn{display:inline-flex} перебивает [hidden]
+          document.getElementById('body').innerHTML = '<div class="empty-state">Нет доступа к разделу — управлять пользователями могут владелец и администраторы.</div>';
+          return;
+        }
+        load();
+      })
+      .catch((err) => {
+        document.getElementById('body').innerHTML = `<div class="empty-state">${Fulfil.esc(Fulfil.errorText(err))}</div>`;
+      });
+  </script>
+</body>
+</html>

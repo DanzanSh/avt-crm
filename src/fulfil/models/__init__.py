@@ -1,4 +1,5 @@
 from fulfil.models.client import Client
+from fulfil.models.user import User, UserRole
 from fulfil.models.product import Product
 from fulfil.models.storage import Zone, Rack, Shelf, Cell, CellAllowedBarcode, CellStatus
 from fulfil.models.receiving import Receipt, ReceiptLine, ReceiptPlanLine, ReceiptStatus
@@ -27,6 +28,8 @@ from fulfil.models.integration_state import IntegrationState
 
 __all__ = [
     "Client",
+    "User",
+    "UserRole",
     "Product",
     "Zone",
     "Rack",

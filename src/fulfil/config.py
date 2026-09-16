@@ -11,6 +11,9 @@ class Settings(BaseSettings):
     # Обязательные — приложение не стартует, если не заданы в окружении / .env
     # (пустая строка тоже считается «не задано»).
     database_url: str = Field(min_length=1)
+    # С появления учётных записей (problems.txt, п.5) вход идёт по таблице users.
+    # Эти два поля нужны только для первого запуска: миграция c7d2a9e5f013 и
+    # страховочный сев в main.lifespan заводят из них владельца (хоста).
     admin_login: str = Field(min_length=1)
     admin_password: str = Field(min_length=1)
 

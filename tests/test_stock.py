@@ -228,3 +228,17 @@ def test_transfer_to_fbs_locks_product_row(db, seller):
         transfer_to_fbs(db, product, 1, idempotency_key="k2", wb_client=wb)
     assert exc_info.value.reason_code == "not_enough_stock"
     assert db.scalar(sa_select(Product).where(Product.id == product.id)).wb_fbs_amount == 10
+
+
+def test_stock_list_includes_vendor_code_size_color(db, seller):
+    """problems.txt, п.4: в «Остатках» рядом с названием — артикул клиента, размер, цвет."""
+    from fulfil.api.v1.stock import list_stock
+
+    product = _make_product(db, seller)
+    product.vendor_code, product.size, product.color = "ART-42", "M", "белый"
+    db.commit()
+    [cell] = generate_cells(db, "A", racks=1, cells_per_rack=1)
+    place_stock(db, product, cell, 3)
+
+    [row] = list_stock(client_id=None, db=db)
+    assert (row["vendorCode"], row["size"], row["color"]) == ("ART-42", "M", "белый")

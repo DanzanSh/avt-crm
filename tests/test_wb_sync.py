@@ -82,3 +82,30 @@ def test_match_by_wb_chrt_id_when_barcode_changed(db, seller):
     rows = db.scalars(select(Product).where(Product.wb_chrt_id == 1)).all()
     assert len(rows) == 1  # не создан дубль — матч по (client_id, wb_chrt_id), а не по баркоду
     assert rows[0].name == "Товар 1 new"  # карточка обновлена, не продублирована
+
+
+def test_wb_ids_are_bigint():
+    """Регрессия: chrtID 2222347681 > INTEGER — на Postgres синк падал 500
+    (NumericValueOutOfRange). SQLite в тестах переполнения не ловит, поэтому
+    проверяем сам тип колонок."""
+    from sqlalchemy import BigInteger
+
+    from fulfil.models.fbs import Order
+
+    for column in (
+        Product.__table__.c.wb_nm_id, Product.__table__.c.wb_imt_id, Product.__table__.c.wb_chrt_id,
+        Order.__table__.c.wb_nm_id, Order.__table__.c.wb_chrt_id,
+    ):
+        assert isinstance(column.type, BigInteger), column
+
+
+def test_sync_card_with_chrt_id_above_int32(db, seller):
+    class _Wb:
+        def get_product_cards(self, cursor=None):
+            card = {"nmId": 3000000000, "imtId": 3000000001, "chrtId": 2222347681,
+                    "barcode": "2000000000099", "name": "Товар big"}
+            return {"cards": [card], "cursor": {"updatedAt": "2026-01-01T00:00:00Z", "nmID": 1, "total": 1}}
+
+    assert sync_products_from_wb(db, seller, _Wb())["imported"] == 1
+    product = db.scalar(select(Product).where(Product.wb_chrt_id == 2222347681))
+    assert product is not None and product.wb_nm_id == 3000000000

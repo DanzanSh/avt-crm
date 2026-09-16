@@ -283,6 +283,7 @@
               <span class="badge badge-muted">${Fulfil.esc(receipt.clientName || '')}</span>
               <span class="badge ${cls}">${label}</span>
               <button class="btn btn-sm" id="btnEditReceipt" style="margin-left:auto">Изменить</button>
+              ${canDelete() ? '<button class="btn btn-sm btn-danger" id="btnDeleteReceipt">Удалить</button>' : ''}
             </div>
             <div class="receipt-meta">
               ${receipt.expectedDate ? 'Ожидается: ' + fmtDate(receipt.expectedDate) : 'Дата не указана'}
@@ -291,30 +292,81 @@
               ${receipt.startedAt ? ' · начата ' + fmtDateTime(receipt.startedAt) : ''}
               ${receipt.finishedAt ? ' · завершена ' + fmtDateTime(receipt.finishedAt) : ''}
             </div>
+            ${
+              receipt.status === 'draft'
+                ? '<div class="receipt-meta" style="margin-bottom:0">Состав приёмки редактируется в блоке «План приёмки» ниже.</div>'
+                : ''
+            }
           </div>`;
+      }
+
+      // Удалить можно, пока ничего не принято (problems.txt, п.3) — то же условие
+      // проверяет сервер (services.receiving.delete_receipt).
+      function canDelete() {
+        return receipt.status === 'draft' || (receipt.status === 'in_progress' && !receipt.acceptedTotal);
       }
 
       function bindHead() {
         document.getElementById('btnEditReceipt').addEventListener('click', async () => {
+          const isDraft = receipt.status === 'draft';
+          let clients = [];
+          if (isDraft) {
+            try {
+              clients = await Fulfil.api('GET', '/clients');
+            } catch (err) {
+              Fulfil.toast(Fulfil.errorText(err), 'error');
+              return;
+            }
+            // Клиент приёмки мог уйти в архив — в списке живых его нет, но выбор должен его показать.
+            if (!clients.some((c) => c.id === receipt.clientId)) {
+              clients.unshift({ id: receipt.clientId, name: receipt.clientName || `#${receipt.clientId}` });
+            }
+          }
           const values = await Fulfil.formModal({
             title: 'Изменить приёмку',
             submitLabel: 'Сохранить',
             fields: [
+              ...(isDraft
+                ? [{
+                    id: 'clientId', label: 'Клиент', type: 'select', required: true, value: receipt.clientId,
+                    hint: receipt.planLinesCount ? 'При смене клиента план приёмки будет очищен.' : '',
+                    options: clients.map((c) => ({ value: c.id, label: c.name })),
+                  }]
+                : []),
               { id: 'expectedDate', label: 'Ожидаемая дата', type: 'date', value: receipt.expectedDate || '' },
               { id: 'comment', label: 'Комментарий', type: 'textarea', value: receipt.comment || '' },
             ],
           });
           if (!values) return;
+          const payload = {
+            expectedDate: values.expectedDate || null,
+            comment: values.comment || null,
+          };
+          if (isDraft && Number(values.clientId) !== receipt.clientId) {
+            if (receipt.planLinesCount && !confirm('План приёмки будет очищен. Продолжить?')) return;
+            payload.clientId = Number(values.clientId);
+          }
           try {
-            receipt = await Fulfil.api('PATCH', `/receiving/${receiptId}`, {
-              expectedDate: values.expectedDate || null,
-              comment: values.comment || null,
-            });
+            receipt = await Fulfil.api('PATCH', `/receiving/${receiptId}`, payload);
             renderDetail();
           } catch (err) {
             Fulfil.toast(Fulfil.errorText(err), 'error');
           }
         });
+
+        const btnDelete = document.getElementById('btnDeleteReceipt');
+        if (btnDelete) {
+          btnDelete.addEventListener('click', async () => {
+            if (!confirm(`Удалить приёмку ${receipt.number}? Обратной операции нет.`)) return;
+            try {
+              await Fulfil.api('DELETE', `/receiving/${receiptId}`);
+              // Тост потерялся бы при переходе — список сам покажет, что приёмки нет.
+              location.href = '/receiving.html';
+            } catch (err) {
+              Fulfil.toast(Fulfil.errorText(err), 'error');
+            }
+          });
+        }
       }
 
       // --- DRAFT: план ---

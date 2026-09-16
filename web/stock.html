@@ -25,6 +25,10 @@
     .stock-summary { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 18px; }
     .stock-summary .stat-card { min-width: 180px; }
     .oversold { color: var(--red); font-size: 14px; margin-top: 2px; }
+    /* problems.txt, п.4 — артикул/размер/цвет под названием: название WB не всегда их различает. */
+    .product-meta { display: flex; flex-wrap: wrap; gap: 2px 12px; font-size: 13px; margin-top: 2px; }
+    .product-meta .meta-label { color: var(--muted); }
+    .product-meta .meta-value { color: var(--text-2); font-weight: 600; }
     /* Внутренняя таблица по ячейкам: колонки по содержимому, а не на всю ширину. */
     .by-cell-table { width: auto; margin-top: 4px; }
     .by-cell-table td { padding: 6px 8px; border-bottom: none; white-space: nowrap; }
@@ -173,7 +177,10 @@
             (r) => `
           <tr class="row-toggle" data-product-id="${r.productId}">
             <td><span class="chevron">▶</span></td>
-            <td>${Fulfil.esc(r.productName)} <span class="badge badge-muted">${Fulfil.esc(r.clientName || '')}</span></td>
+            <td>
+              ${Fulfil.esc(r.productName)} <span class="badge badge-muted">${Fulfil.esc(r.clientName || '')}</span>
+              ${productMetaHtml(r)}
+            </td>
             <td style="font-family:var(--mono)">${Fulfil.esc(r.barcode)}</td>
             <td class="num">${r.total}</td>
             <td class="num">${r.inOrders}</td>
@@ -208,12 +215,28 @@
       }
     }
 
+    // Пустые поля скрываются — в отличие от «Товаров», где тире подсказывает, что поле можно заполнить.
+    function productMetaHtml(r) {
+      const items = [['Артикул', r.vendorCode], ['Размер', r.size], ['Цвет', r.color]]
+        .filter(([, v]) => v)
+        .map(
+          ([label, v]) =>
+            `<span><span class="meta-label">${label}:</span> <span class="meta-value">${Fulfil.esc(v)}</span></span>`
+        );
+      return items.length ? `<div class="product-meta">${items.join('')}</div>` : '';
+    }
+
+    // Подпись товара в модалках операций: «Название · арт. X».
+    function productLabel(data) {
+      return Fulfil.esc(data.productName) + (data.vendorCode ? ` · арт. ${Fulfil.esc(data.vendorCode)}` : '');
+    }
+
     function renderByCell(r) {
       if (!r.byCell.length) return '<span style="color:var(--muted)">нет остатка по ячейкам</span>';
       return `<table class="by-cell-table">${r.byCell
         .map(
           (c) => `
-        <tr data-product-id="${r.productId}" data-cell-id="${c.cellId}" data-qty="${c.qty}" data-product-name="${Fulfil.esc(r.productName)}">
+        <tr data-product-id="${r.productId}" data-cell-id="${c.cellId}" data-qty="${c.qty}" data-product-name="${Fulfil.esc(r.productName)}" data-vendor-code="${Fulfil.esc(r.vendorCode || '')}">
           <td style="font-family:var(--mono)">${Fulfil.esc(c.cellAddress)}</td>
           <td class="num">${c.qty} шт</td>
           <td><button class="btn btn-sm btn-adjust">Изменить</button></td>
@@ -252,6 +275,7 @@
         cellId: tr.dataset.cellId,
         qty: Number(tr.dataset.qty),
         productName: tr.dataset.productName,
+        vendorCode: tr.dataset.vendorCode,
       };
     }
 
@@ -263,7 +287,7 @@
       const body = document.getElementById('opModalBody');
       body.innerHTML = `
         <h2>Изменить остаток</h2>
-        <div style="font-size:13px;color:var(--muted)">${Fulfil.esc(data.productName)} · сейчас ${data.qty} шт</div>
+        <div style="font-size:13px;color:var(--muted)">${productLabel(data)} · сейчас ${data.qty} шт</div>
         <div class="field-row"><input class="input" id="opNewQty" type="number" min="0" value="${data.qty}" placeholder="Новое количество" /></div>
         <div class="field-row"><input class="input" id="opComment" placeholder="Комментарий (обязателен при уменьшении)" /></div>
         <div class="field-row">
@@ -293,7 +317,7 @@
       const body = document.getElementById('opModalBody');
       body.innerHTML = `
         <h2>Списать остаток</h2>
-        <div style="font-size:13px;color:var(--muted)">${Fulfil.esc(data.productName)} · будет списано ${data.qty} шт целиком</div>
+        <div style="font-size:13px;color:var(--muted)">${productLabel(data)} · будет списано ${data.qty} шт целиком</div>
         <div class="field-row"><input class="input" id="opComment" placeholder="Причина списания (обязательно)" required /></div>
         <div class="field-row">
           <button type="button" class="btn" id="opCancel">Отмена</button>
@@ -322,7 +346,7 @@
       const body = document.getElementById('opModalBody');
       body.innerHTML = `
         <h2>Переместить</h2>
-        <div style="font-size:13px;color:var(--muted)">${Fulfil.esc(data.productName)} · доступно ${data.qty} шт</div>
+        <div style="font-size:13px;color:var(--muted)">${productLabel(data)} · доступно ${data.qty} шт</div>
         <div class="field-row"><input class="input" id="opToCell" placeholder="Ячейка назначения (скан/адрес/ШК)" data-scan="auto" autofocus /></div>
         <div class="field-row"><input class="input" id="opQty" type="number" min="1" max="${data.qty}" value="${data.qty}" placeholder="Количество" /></div>
         <div class="field-row"><input class="input" id="opComment" placeholder="Комментарий (необязательно)" /></div>

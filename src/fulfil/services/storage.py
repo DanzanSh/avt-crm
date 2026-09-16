@@ -20,6 +20,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from fulfil.errors import (
+    AllowedBarcodesConflictError,
     AppError,
     BarcodeNotAllowedError,
     CellBlockedError,
@@ -571,6 +572,65 @@ def check_placement_allowed(db: Session, cell: Cell, product_barcode: str) -> No
         )
     # занятость другим SKU проверяется в services.receiving.place_stock / services.stock.move_stock,
     # где виден фактический остаток по ячейке
+
+
+def _assert_contents_allowed(db: Session, cell: Cell, allowed: set[str]) -> None:
+    """Инвариант допуска (problems.txt, п.1): если список не пуст, каждый товар,
+    уже лежащий в ячейке, должен в него входить. Иначе настройка противоречит
+    фактическому содержимому — check_placement_allowed ловит это только при
+    следующем размещении, а лежащий товар оказался бы «запрещённым» в своей же ячейке."""
+    if not allowed:
+        return
+    conflicts = [
+        {"productName": c["productName"], "barcode": c["barcode"]}
+        for c in get_cell_contents(db, cell)
+        if c["barcode"] not in allowed
+    ]
+    if conflicts:
+        listed = ", ".join(f'«{c["productName"]}» (ШК {c["barcode"]})' for c in conflicts)
+        raise AllowedBarcodesConflictError(
+            f"В месте {cell.address} лежит {listed} — баркод не входит в список допуска.",
+            contents=conflicts,
+        )
+
+
+def add_allowed_barcode(db: Session, cell: Cell, barcode: str, actor: str) -> None:
+    barcode = barcode.strip()
+    current = {a.barcode for a in cell.allowed_barcodes}
+    if barcode in current:
+        return
+    known = db.scalar(
+        select(Product.id).where(Product.barcode == barcode, Product.archived_at.is_(None)).limit(1)
+    )
+    if known is None:
+        # Опечатка в допуске закрыла бы ячейку для всех реальных товаров.
+        raise AppError(
+            f"Товара с баркодом «{barcode}» нет в каталоге.",
+            status_code=422,
+            reason_code="unknown_barcode",
+            what_to_do="Проверьте баркод или сначала заведите товар.",
+        )
+    _assert_contents_allowed(db, cell, current | {barcode})
+    db.add(CellAllowedBarcode(cell_id=cell.id, barcode=barcode))
+    audit.record(
+        db, entity_type="cell", entity_id=cell.id, action="allowed_add", actor=actor, comment=barcode
+    )
+    db.commit()
+    db.refresh(cell)
+
+
+def remove_allowed_barcode(db: Session, cell: Cell, barcode: str, actor: str) -> None:
+    row = next((a for a in cell.allowed_barcodes if a.barcode == barcode), None)
+    if row is None:
+        return
+    # Последний баркод снимать можно всегда: пустой список = «любой товар».
+    _assert_contents_allowed(db, cell, {a.barcode for a in cell.allowed_barcodes} - {barcode})
+    cell.allowed_barcodes.remove(row)
+    audit.record(
+        db, entity_type="cell", entity_id=cell.id, action="allowed_remove", actor=actor, comment=barcode
+    )
+    db.commit()
+    db.refresh(cell)
 
 
 def block_cell(db: Session, cell: Cell, reason: str) -> None:

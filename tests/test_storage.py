@@ -312,3 +312,65 @@ def test_delete_shelf_blocked_when_cell_has_stock(db, seller):
 
     with pytest.raises(CellsNotReleasableError):
         delete_shelf(db, get_live_shelf(db, shelf_id), actor="tester")
+
+
+# --- Допустимые баркоды места (problems.txt, п.1) ---
+
+
+def test_add_allowed_barcode_rejects_when_other_product_lies_in_cell(db, seller):
+    from fulfil.errors import AllowedBarcodesConflictError
+    from fulfil.services.storage import add_allowed_barcode
+
+    product_a = _make_product(db, seller, barcode="1111111111111", name="Товар A")
+    _make_product(db, seller, barcode="2222222222222", name="Товар B")
+    [cell] = generate_cells(db, "A", racks=1, cells_per_rack=1)
+    place_stock(db, product_a, cell, 5)
+
+    with pytest.raises(AllowedBarcodesConflictError) as exc_info:
+        add_allowed_barcode(db, cell, "2222222222222", actor="t")
+    assert exc_info.value.extra["contents"] == [{"productName": "Товар A", "barcode": "1111111111111"}]
+    assert cell.allowed_barcodes == []
+
+
+def test_add_allowed_barcode_of_product_in_cell_then_other(db, seller):
+    from fulfil.services.storage import add_allowed_barcode
+
+    product_a = _make_product(db, seller, barcode="1111111111111", name="Товар A")
+    _make_product(db, seller, barcode="2222222222222", name="Товар B")
+    [cell] = generate_cells(db, "A", racks=1, cells_per_rack=1)
+    place_stock(db, product_a, cell, 5)
+
+    add_allowed_barcode(db, cell, " 1111111111111 ", actor="t")
+    add_allowed_barcode(db, cell, "2222222222222", actor="t")  # A уже в списке — ok
+    add_allowed_barcode(db, cell, "2222222222222", actor="t")  # повтор — без дубля
+    assert sorted(a.barcode for a in cell.allowed_barcodes) == ["1111111111111", "2222222222222"]
+
+
+def test_add_allowed_barcode_unknown_barcode(db, seller):
+    from fulfil.errors import AppError
+    from fulfil.services.storage import add_allowed_barcode
+
+    [cell] = generate_cells(db, "A", racks=1, cells_per_rack=1)
+    with pytest.raises(AppError) as exc_info:
+        add_allowed_barcode(db, cell, "0000000000000", actor="t")
+    assert exc_info.value.reason_code == "unknown_barcode"
+
+
+def test_remove_allowed_barcode_of_product_in_cell(db, seller):
+    from fulfil.errors import AllowedBarcodesConflictError
+    from fulfil.services.storage import add_allowed_barcode, remove_allowed_barcode
+
+    product_a = _make_product(db, seller, barcode="1111111111111", name="Товар A")
+    _make_product(db, seller, barcode="2222222222222", name="Товар B")
+    [cell] = generate_cells(db, "A", racks=1, cells_per_rack=1)
+    place_stock(db, product_a, cell, 5)
+    add_allowed_barcode(db, cell, "1111111111111", actor="t")
+    add_allowed_barcode(db, cell, "2222222222222", actor="t")
+
+    with pytest.raises(AllowedBarcodesConflictError):
+        remove_allowed_barcode(db, cell, "1111111111111", actor="t")
+
+    remove_allowed_barcode(db, cell, "2222222222222", actor="t")
+    remove_allowed_barcode(db, cell, "1111111111111", actor="t")  # последний — можно всегда
+    assert cell.allowed_barcodes == []
+    remove_allowed_barcode(db, cell, "1111111111111", actor="t")  # уже нет — без ошибки

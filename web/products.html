@@ -337,7 +337,12 @@
             .filter(Boolean)
             .join(' · ');
 
-          const actions = p.archivedAt
+          // Товар архивного клиента (problems.txt, п.2) — архивом управляет клиент,
+          // поэтому ни «Восстановить», ни правок у самого товара нет.
+          const archived = p.archivedAt || p.clientArchived;
+          const actions = p.clientArchived
+            ? ''
+            : p.archivedAt
             ? `<button class="btn btn-restore" data-id="${p.id}">Восстановить</button>`
             : `<button class="btn btn-edit" data-id="${p.id}">Изменить</button>
                <button class="btn btn-danger btn-delete" data-id="${p.id}">Удалить</button>
@@ -352,10 +357,10 @@
             : `<div class="product-thumb product-thumb--empty" aria-hidden="true">—</div>`;
 
           return `
-        <div class="list-card list-card--with-thumb ${p.archivedAt ? 'archived-row' : ''}" data-id="${p.id}">
+        <div class="list-card list-card--with-thumb ${archived ? 'archived-row' : ''}" data-id="${p.id}">
           ${thumbHtml}
           <div class="product-content">
-            <div class="product-name">${Fulfil.esc(p.name)}${mark('name')}${p.archivedAt ? ' <span class="badge badge-muted">архив</span>' : ''}</div>
+            <div class="product-name">${Fulfil.esc(p.name)}${mark('name')}${p.clientArchived ? ' <span class="badge badge-muted">клиент в архиве</span>' : p.archivedAt ? ' <span class="badge badge-muted">архив</span>' : ''}</div>
             <div class="list-card__meta product-meta">${meta.join('')}</div>
             <div class="product-stock">${stockLine}</div>
             <div class="card-actions">${actions}</div>

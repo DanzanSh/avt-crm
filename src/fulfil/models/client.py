@@ -1,6 +1,6 @@
 import datetime as dt
 
-from sqlalchemy import Index, String, Text, DateTime, func, text
+from sqlalchemy import Index, String, Text, DateTime, func, select, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from fulfil.db import Base
@@ -35,3 +35,15 @@ class Client(Base):
         DateTime(timezone=True), server_default=func.now()
     )
     archived_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    # Мягкое удаление хостом (problems.txt, п.5): удалённый клиент всегда ещё и
+    # архивирован (archived_at заполнен), поэтому все существующие фильтры «живых»
+    # его уже скрывают, а имя освобождается тем же uq_client_name_live. deleted_at
+    # дополнительно прячет его из «показать архивных» — видит только хост.
+    deleted_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    deleted_by: Mapped[str | None] = mapped_column(String(64))
+
+
+def deleted_client_ids():
+    """Подзапрос id удалённых клиентов — для списков приёмок, заказов, поставок и
+    товаров: строки удалённого клиента не показываются никому (authorization-model.md, 4.2)."""
+    return select(Client.id).where(Client.deleted_at.is_not(None))

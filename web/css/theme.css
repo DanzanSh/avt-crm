@@ -116,6 +116,7 @@ a { color: var(--blue); }
   color: var(--text-2);
   white-space: nowrap;
 }
+.archived-toggle[hidden] { display: none; } /* display:flex выше перебивает [hidden] */
 
 /* ── Кнопки ─────────────────────────────────────────────────────── */
 

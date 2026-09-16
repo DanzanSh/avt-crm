@@ -10,7 +10,10 @@ def get_pages() -> list[dict]:
     """Реестр страниц — единственный источник правды (fulfil.pages.PAGES).
     Фронт строит сайдбар и ACL из этого ответа, не хранит собственной копии карты."""
     return [
-        {"key": p.key, "href": p.href, "label": p.label, "section": p.section, "counter": p.counter}
+        {
+            "key": p.key, "href": p.href, "label": p.label, "section": p.section, "counter": p.counter,
+            "roles": list(p.roles) if p.roles else None,
+        }
         for p in PAGES
     ]
 

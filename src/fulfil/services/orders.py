@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session, selectinload
 from fulfil.errors import AppError, NotFoundError
 from fulfil.integrations.wb import get_wb_client
 from fulfil.integrations.wb.base import WBClient, parse_wb_datetime
-from fulfil.models.client import Client
+from fulfil.models.client import Client, deleted_client_ids
 from fulfil.models.fbs import Order, OrderItem, OrderStatus, PickLine, Supply, SupplyStatus
 from fulfil.models.product import Product
 from fulfil.models.storage import Cell
@@ -312,6 +312,8 @@ def list_orders(
     stmt = (
         select(Order)
         .options(selectinload(Order.items).selectinload(OrderItem.product), selectinload(Order.client))
+        # удалённый клиент скрыт отовсюду (problems.txt, п.5)
+        .where(Order.client_id.not_in(deleted_client_ids()))
         .order_by(Order.id.desc())
     )
     if group in ("packed", "archive"):
@@ -359,10 +361,11 @@ def get_order_counters(db: Session, *, client_id: int | None = None) -> dict:
         ),
         else_="archive",
     )
+    hidden = Order.client_id.not_in(deleted_client_ids())
     stmt = select(group_expr.label("grp"), func.count()).select_from(Order).outerjoin(
         Supply, Supply.id == Order.supply_id
-    )
-    problems_stmt = select(func.count()).select_from(Order).where(Order.problem.is_not(None))
+    ).where(hidden)
+    problems_stmt = select(func.count()).select_from(Order).where(Order.problem.is_not(None), hidden)
     if client_id is not None:
         stmt = stmt.where(Order.client_id == client_id)
         problems_stmt = problems_stmt.where(Order.client_id == client_id)

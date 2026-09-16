@@ -18,6 +18,9 @@ class PageDef:
     # Ключ из GET /fbs/orders/counters, чей счётчик рисуется бейджем в сайдбаре
     # (Этап 3, п.3.4) — None (по умолчанию) значит "без бейджа".
     counter: str | None = None
+    # Роли, которым страница видна в сайдбаре; None — всем. Защита — на API
+    # (require_admin), здесь только чтобы не показывать ссылку, ведущую в 403.
+    roles: tuple[str, ...] | None = None
 
 
 PAGES: list[PageDef] = [
@@ -30,6 +33,7 @@ PAGES: list[PageDef] = [
     PageDef("orders", "/fbs/orders.html", "Заказы ФБС", "ФБС", counter="new"),
     PageDef("picking", "/fbs/picking.html", "Сборка заказа", "ФБС"),
     PageDef("supplies", "/fbs/supplies.html", "Поставки", "ФБС"),
+    PageDef("users", "/users.html", "Пользователи", "Настройки", roles=("host", "admin")),
 ]
 
 HREF_TO_PAGE: dict[str, str] = {p.href: p.key for p in PAGES}

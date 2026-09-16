@@ -108,3 +108,23 @@ def test_filter_options_scoped_to_client(db, seller):
     assert filter_options(db, client_id=seller.id)["brand"] == ["Nike"]
     assert filter_options(db, client_id=other.id)["brand"] == ["Puma"]
     assert filter_options(db)["brand"] == ["Nike", "Puma"]
+
+
+def test_archived_client_products_hidden_unless_include_archived(db, seller):
+    """problems.txt, п.2: клиент в архиве — его товары не видны в каталоге и в вариантах
+    фильтров, пока не включено «показать архивные»."""
+    other = make_client(db, name="Архивный клиент")
+    _seed(db, seller.id, [("2000000000001", "Футболка", "M", "белый", "Nike")])
+    _seed(db, other.id, [("2000000000002", "Худи", "L", "чёрный", "Puma")])
+    other.archived_at = dt.datetime.now(dt.timezone.utc)
+    db.commit()
+
+    assert _names(list_products(db)) == ["Футболка"]
+    assert _names(list_products(db, client_id=other.id)) == []
+    assert filter_options(db)["brand"] == ["Nike"]
+
+    shown = {p.name: p for p in list_products(db, include_archived=True)}
+    assert sorted(shown) == ["Футболка", "Худи"]
+    assert shown["Худи"].client_archived is True
+    assert shown["Футболка"].client_archived is False
+    assert filter_options(db, include_archived=True)["brand"] == ["Nike", "Puma"]

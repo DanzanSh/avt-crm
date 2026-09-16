@@ -15,6 +15,9 @@ class ClientOut(CamelModel):
     last_sync_at: dt.datetime | None = None
     last_sync_error: str | None = None
     archived_at: dt.datetime | None = None
+    # Заполнены только у удалённых — а их отдаёт только хосту (GET /clients?state=deleted).
+    deleted_at: dt.datetime | None = None
+    deleted_by: str | None = None
     # Счётчики — только у GET /clients (list_clients_with_counters), 0 по умолчанию
     # у ручек создания/правки, где их не считали.
     sku_count: int = 0

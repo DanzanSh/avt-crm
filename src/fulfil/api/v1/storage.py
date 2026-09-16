@@ -9,7 +9,7 @@ from fulfil.auth import get_current_user
 from fulfil.db import get_db
 from fulfil.errors import NotFoundError
 from fulfil.labels.cell_labels import render_cell_labels_pdf
-from fulfil.models.storage import Cell, CellAllowedBarcode
+from fulfil.models.storage import Cell
 from fulfil.schemas.storage import (
     AddRacksRequest,
     AllowedBarcodeRequest,
@@ -102,30 +102,20 @@ def delete_cell(cell_id: int, db: Session = Depends(get_db), user: dict = Depend
 
 @router.post("/cells/{cell_id}/allowed-barcodes")
 def add_allowed_barcode(
-    cell_id: int, body: AllowedBarcodeRequest, db: Session = Depends(get_db)
+    cell_id: int, body: AllowedBarcodeRequest, db: Session = Depends(get_db),
+    user: dict = Depends(get_current_user),
 ) -> dict:
-    _get_cell(db, cell_id)
-    existing = db.scalar(
-        select(CellAllowedBarcode).where(
-            CellAllowedBarcode.cell_id == cell_id, CellAllowedBarcode.barcode == body.barcode
-        )
-    )
-    if existing is None:
-        db.add(CellAllowedBarcode(cell_id=cell_id, barcode=body.barcode))
-        db.commit()
+    cell = _get_cell(db, cell_id)
+    storage_service.add_allowed_barcode(db, cell, body.barcode, actor=_actor(user))
     return {"ok": True}
 
 
 @router.delete("/cells/{cell_id}/allowed-barcodes/{barcode}")
-def remove_allowed_barcode(cell_id: int, barcode: str, db: Session = Depends(get_db)) -> dict:
-    row = db.scalar(
-        select(CellAllowedBarcode).where(
-            CellAllowedBarcode.cell_id == cell_id, CellAllowedBarcode.barcode == barcode
-        )
-    )
-    if row:
-        db.delete(row)
-        db.commit()
+def remove_allowed_barcode(
+    cell_id: int, barcode: str, db: Session = Depends(get_db), user: dict = Depends(get_current_user)
+) -> dict:
+    cell = _get_cell(db, cell_id)
+    storage_service.remove_allowed_barcode(db, cell, barcode, actor=_actor(user))
     return {"ok": True}
 
 

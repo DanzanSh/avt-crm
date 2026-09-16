@@ -67,6 +67,20 @@ class BarcodeNotAllowedError(AppError):
         )
 
 
+class AllowedBarcodesConflictError(AppError):
+    """409 — новый список допуска ячейки не пускает товар, который в ней уже лежит."""
+
+    def __init__(self, detail: str, contents: list[dict]):
+        super().__init__(
+            detail,
+            status_code=status.HTTP_409_CONFLICT,
+            reason_code="allowed_conflicts_contents",
+            what_to_do="Сначала переместите или спишите товар из ячейки, "
+            "либо добавьте в допуск и его баркод.",
+            extra={"contents": contents},
+        )
+
+
 class WbApiError(AppError):
     """502 — Wildberries Seller API ответил ошибкой или недоступен.
 

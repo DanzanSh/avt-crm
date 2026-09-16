@@ -8,6 +8,7 @@ from fulfil.auth import get_current_user
 from fulfil.db import get_db
 from fulfil.errors import AppError, NotFoundError
 from fulfil.integrations.wb import get_wb_client
+from fulfil.models.client import Client
 from fulfil.models.product import Product
 from fulfil.schemas.stock import (
     AdjustStockRequest,
@@ -34,7 +35,8 @@ def list_stock(client_id: int | None = None, db: Session = Depends(get_db)) -> l
     stmt = (
         select(Product)
         .options(selectinload(Product.client))
-        .where(Product.archived_at.is_(None))
+        .join(Client, Client.id == Product.client_id)
+        .where(Product.archived_at.is_(None), Client.archived_at.is_(None))
         .order_by(Product.name)
     )
     if client_id is not None:
@@ -52,9 +54,7 @@ def list_stock(client_id: int | None = None, db: Session = Depends(get_db)) -> l
         result.append(
             {
                 **summary,
-                "productName": p.name,
-                "barcode": p.barcode,
-                "clientId": p.client_id,
+                **_product_fields(p),
                 "clientName": p.client_name,
                 "byCell": by_cell.get(p.id, []),
             }
@@ -136,11 +136,22 @@ def transfer_all_available_fbs(
     return results
 
 
+def _product_fields(product: Product) -> dict:
+    """Название WB не всегда различает товары (problems.txt, п.4) — рядом отдаём
+    артикул клиента, размер и цвет."""
+    return {
+        "productName": product.name,
+        "barcode": product.barcode,
+        "vendorCode": product.vendor_code,
+        "size": product.size,
+        "color": product.color,
+    }
+
+
 def _product_agg(db: Session, product: Product) -> dict:
     return {
         **stock_service.get_stock_summary(db, product),
-        "productName": product.name,
-        "barcode": product.barcode,
+        **_product_fields(product),
         "clientId": product.client_id,
         "clientName": product.client_name,
         "byCell": stock_service.get_stock_by_cell(db, product),

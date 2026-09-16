@@ -383,3 +383,94 @@ def test_receipt_history_visible_from_fresh_session(db, seller):
     rows = list_receipt_lines(db)
     assert len(rows) == 1
     assert rows[0]["qty"] == 2
+
+
+# --- Удаление приёмки и смена клиента (problems.txt, п.3) ---
+
+
+def test_delete_draft_receipt(db, seller):
+    from fulfil.models.receiving import Receipt, ReceiptPlanLine
+    from fulfil.services.receiving import delete_receipt
+
+    _make_product(db, seller, barcode="1111111111111")
+    receipt = create_receipt(db, seller, expected_date=None, comment=None, actor="t")
+    set_plan_lines(db, receipt, [("1111111111111", 3)])
+
+    delete_receipt(db, receipt, actor="t")
+    assert db.scalars(select(Receipt)).all() == []
+    assert db.scalars(select(ReceiptPlanLine)).all() == []
+
+
+def test_delete_in_progress_receipt_without_lines(db, seller):
+    from fulfil.models.receiving import Receipt
+    from fulfil.services.receiving import delete_receipt
+
+    _make_product(db, seller, barcode="1111111111111")
+    receipt = create_receipt(db, seller, expected_date=None, comment=None, actor="t")
+    set_plan_lines(db, receipt, [("1111111111111", 3)])
+    start_receipt(db, receipt)
+
+    delete_receipt(db, receipt, actor="t")
+    assert db.scalars(select(Receipt)).all() == []
+
+
+def test_delete_receipt_with_accepted_lines_forbidden(db, seller):
+    from fulfil.services.receiving import delete_receipt
+
+    product = _make_product(db, seller, barcode="1111111111111")
+    [cell] = generate_cells(db, "A", racks=1, cells_per_rack=1)
+    receipt = create_receipt(db, seller, expected_date=None, comment=None, actor="t")
+    set_plan_lines(db, receipt, [("1111111111111", 3)])
+    start_receipt(db, receipt)
+    accept_manual(db, receipt, [{"productId": product.id, "qty": 2, "cellCode": cell.address}], actor="t")
+
+    with pytest.raises(AppError) as exc_info:
+        delete_receipt(db, receipt, actor="t")
+    assert exc_info.value.reason_code == "receipt_has_accepted_lines"
+
+
+def test_change_client_in_draft_clears_plan(db, seller):
+    import datetime as dt
+
+    from fulfil.services.receiving import update_receipt
+
+    other = make_client(db, name="Другой клиент")
+    _make_product(db, seller, barcode="1111111111111")
+    receipt = create_receipt(db, seller, expected_date=dt.date(2026, 9, 20), comment="x", actor="t")
+    set_plan_lines(db, receipt, [("1111111111111", 3)])
+
+    update_receipt(db, receipt, changes={"client_id": other.id}, actor="t")
+    assert receipt.client_id == other.id
+    assert receipt.plan_lines == []
+    # частичный PATCH: непереданные поля не затёрты
+    assert receipt.expected_date == dt.date(2026, 9, 20)
+    assert receipt.comment == "x"
+
+
+def test_change_client_not_in_draft_forbidden(db, seller):
+    from fulfil.services.receiving import update_receipt
+
+    other = make_client(db, name="Другой клиент")
+    _make_product(db, seller, barcode="1111111111111")
+    receipt = create_receipt(db, seller, expected_date=None, comment=None, actor="t")
+    set_plan_lines(db, receipt, [("1111111111111", 3)])
+    start_receipt(db, receipt)
+
+    with pytest.raises(AppError) as exc_info:
+        update_receipt(db, receipt, changes={"client_id": other.id}, actor="t")
+    assert exc_info.value.reason_code == "wrong_status"
+
+
+def test_update_date_only_keeps_client_and_plan(db, seller):
+    import datetime as dt
+
+    from fulfil.services.receiving import update_receipt
+
+    _make_product(db, seller, barcode="1111111111111")
+    receipt = create_receipt(db, seller, expected_date=None, comment="c", actor="t")
+    set_plan_lines(db, receipt, [("1111111111111", 3)])
+
+    update_receipt(db, receipt, changes={"expected_date": dt.date(2026, 10, 1)}, actor="t")
+    assert receipt.client_id == seller.id
+    assert len(receipt.plan_lines) == 1
+    assert receipt.comment == "c"

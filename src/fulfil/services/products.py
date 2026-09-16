@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session, selectinload
 from fulfil.errors import AppError
 from fulfil.integrations.wb.base import WBClient
 from fulfil.models import audit
-from fulfil.models.client import Client
+from fulfil.models.client import Client, deleted_client_ids
 from fulfil.models.integration_state import IntegrationState
 from fulfil.models.product import Product
 from fulfil.models.storage import Cell, CellAllowedBarcode
@@ -206,14 +206,26 @@ def sync_products_from_wb(db: Session, client: Client, wb_client: WBClient, *, f
 FILTER_FIELDS = ("name", "size", "color", "brand")
 
 
+def _live_only(stmt):
+    """Живой товар = не архивирован сам и его клиент не в архиве (problems.txt, п.2):
+    archive_client товары не трогает — иначе при восстановлении клиента нельзя было бы
+    отличить товары, архивированные вручную раньше, — поэтому клиента проверяем join'ом."""
+    return stmt.join(Client, Client.id == Product.client_id).where(
+        Product.archived_at.is_(None), Client.archived_at.is_(None)
+    )
+
+
 def list_products(
     db: Session, *, search: str | None = None, include_archived: bool = False,
     client_id: int | None = None, name: str | None = None, size: str | None = None,
     color: str | None = None, brand: str | None = None,
 ) -> list[Product]:
-    stmt = select(Product).options(selectinload(Product.client)).order_by(Product.id.desc())
+    stmt = (
+        select(Product).options(selectinload(Product.client))
+        .where(Product.client_id.not_in(deleted_client_ids())).order_by(Product.id.desc())
+    )
     if not include_archived:
-        stmt = stmt.where(Product.archived_at.is_(None))
+        stmt = _live_only(stmt)
     if client_id is not None:
         stmt = stmt.where(Product.client_id == client_id)
     if search:
@@ -244,9 +256,11 @@ def filter_options(
     options: dict[str, list[str]] = {}
     for field in FILTER_FIELDS:
         column = getattr(Product, field)
-        stmt = select(column).distinct().where(column.is_not(None), column != "")
+        stmt = select(column).distinct().where(
+            column.is_not(None), column != "", Product.client_id.not_in(deleted_client_ids())
+        )
         if not include_archived:
-            stmt = stmt.where(Product.archived_at.is_(None))
+            stmt = _live_only(stmt)
         if client_id is not None:
             stmt = stmt.where(Product.client_id == client_id)
         options[field] = sorted(db.scalars(stmt), key=str.casefold)

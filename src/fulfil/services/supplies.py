@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session, selectinload
 from fulfil.errors import AppError, WbApiError
 from fulfil.integrations.wb import get_wb_client
 from fulfil.integrations.wb.base import WBClient, parse_wb_datetime
-from fulfil.models.client import Client
+from fulfil.models.client import Client, deleted_client_ids
 from fulfil.models.fbs import Order, OrderStatus, Supply, SupplyBox, SupplyStatus
 from fulfil.models.integration_state import IntegrationState
 from fulfil.services.clients import list_syncable_clients
@@ -312,6 +312,8 @@ def list_supplies(
     stmt = (
         select(Supply)
         .options(selectinload(Supply.client), selectinload(Supply.orders))
+        # удалённый клиент скрыт отовсюду (problems.txt, п.5)
+        .where(Supply.client_id.not_in(deleted_client_ids()))
         .order_by(Supply.id.desc())
         .limit(limit)
         .offset(offset)
@@ -331,7 +333,10 @@ def get_supply_counters(db: Session, *, client_id: int | None = None) -> dict:
         (Supply.status == SupplyStatus.ACCEPTED, "accepted"),
         else_="other",
     )
-    stmt = select(group_expr.label("grp"), func.count()).select_from(Supply)
+    stmt = (
+        select(group_expr.label("grp"), func.count()).select_from(Supply)
+        .where(Supply.client_id.not_in(deleted_client_ids()))
+    )
     if client_id is not None:
         stmt = stmt.where(Supply.client_id == client_id)
     stmt = stmt.group_by(group_expr)

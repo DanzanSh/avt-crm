@@ -141,7 +141,8 @@ def update_client(
     return client
 
 
-def archive_client(db: Session, client: Client, actor: str) -> Client:
+def _check_no_stock_and_active_orders(db: Session, client: Client) -> None:
+    """Общие блокировки архивации и удаления: остаток на складе и активные заказы ФБС."""
     total_qty = db.scalar(
         select(func.coalesce(func.sum(StockByCell.qty), 0))
         .select_from(StockByCell)
@@ -169,22 +170,97 @@ def archive_client(db: Session, client: Client, actor: str) -> Client:
             reason_code="client_has_active_orders",
         )
 
+
+def archive_client(db: Session, client: Client, actor: str) -> Client:
+    if client.deleted_at is not None:
+        raise NotFoundError(f"Клиент #{client.id} не найден.")
+    _check_no_stock_and_active_orders(db, client)
     client.archived_at = dt.datetime.now(dt.timezone.utc)
-    audit.record(db, entity_type="client", entity_id=client.id, action="delete", actor=actor)
+    audit.record(db, entity_type="client", entity_id=client.id, action="archive", actor=actor)
     db.commit()
     db.refresh(client)
     return client
 
 
 def restore_client(db: Session, client: Client, actor: str) -> Client:
+    """Только хост (require_host в API, problems.txt, п.5): снимает и архив, и удаление."""
     if client.archived_at is None:
         raise AppError("Клиент не архивирован.", status_code=400, reason_code="not_archived")
     _check_name_unique(db, client.name, exclude_id=client.id)
+    was_deleted = client.deleted_at is not None
     client.archived_at = None
-    audit.record(db, entity_type="client", entity_id=client.id, action="restore", actor=actor)
+    client.deleted_at = None
+    client.deleted_by = None
+    audit.record(
+        db, entity_type="client", entity_id=client.id, action="restore", actor=actor,
+        comment="из удалённых" if was_deleted else None,
+    )
     db.commit()
     db.refresh(client)
     return client
+
+
+def delete_client(db: Session, client: Client, actor: str) -> Client:
+    """Мягкое удаление хостом (problems.txt, п.5): клиент пропадает из всех списков,
+    включая «показать архивных», сотрудник его не видит и вернуть не может. История
+    приёмок и движений остаётся. Удалённый всегда ещё и архивирован — так существующие
+    фильтры «живых» (синк, выборы клиента, uq_client_name_live) работают без правок."""
+    if client.deleted_at is not None:
+        return client
+    _check_no_stock_and_active_orders(db, client)
+    now = dt.datetime.now(dt.timezone.utc)
+    client.archived_at = client.archived_at or now
+    client.deleted_at = now
+    client.deleted_by = actor
+    audit.record(
+        db, entity_type="client", entity_id=client.id, action="delete", actor=actor,
+        comment="soft-deleted: скрыт от сотрудников",
+    )
+    db.commit()
+    db.refresh(client)
+    return client
+
+
+def purge_client(db: Session, client: Client, actor: str) -> None:
+    """Физическое удаление — только у клиента без единой связанной строки. Иначе 409 со
+    счётчиками: FK на clients.id объявлены без ondelete, и база ответила бы 500.
+    Строки audit_log остаются — после удаления это единственный след."""
+    # импорт внутри: services.supplies сам импортирует этот модуль
+    from fulfil.models.receiving import Receipt
+    from fulfil.models.fbs import Supply
+    from fulfil.models.integration_state import IntegrationState
+    from fulfil.models.wb_log import WbApiLog
+    from fulfil.services.products import _wb_state_key
+    from fulfil.services.supplies import _ignored_supplies_key
+
+    history = {
+        "products": db.scalar(select(func.count()).select_from(Product).where(Product.client_id == client.id)) or 0,
+        "receipts": db.scalar(select(func.count()).select_from(Receipt).where(Receipt.client_id == client.id)) or 0,
+        "orders": db.scalar(select(func.count()).select_from(Order).where(Order.client_id == client.id)) or 0,
+        "supplies": db.scalar(select(func.count()).select_from(Supply).where(Supply.client_id == client.id)) or 0,
+    }
+    if any(history.values()):
+        raise AppError(
+            f"У клиента «{client.name}» есть история (товары: {history['products']}, "
+            f"приёмки: {history['receipts']}, заказы: {history['orders']}, "
+            f"поставки: {history['supplies']}) — удалить безвозвратно нельзя.",
+            status_code=409,
+            reason_code="client_has_history",
+            what_to_do="Оставьте клиента удалённым — он и так скрыт от сотрудников.",
+            extra={"history": history},
+        )
+    # Журнал вызовов WB — служебный, не история операций склада: чистим, иначе FK не даст удалить.
+    for row in db.scalars(select(WbApiLog).where(WbApiLog.client_id == client.id)):
+        db.delete(row)
+    for key in (_wb_state_key(client.id), _ignored_supplies_key(client.id)):
+        state = db.get(IntegrationState, key)
+        if state is not None:
+            db.delete(state)
+    audit.record(
+        db, entity_type="client", entity_id=client.id, action="purge", actor=actor, comment=client.name,
+    )
+    db.delete(client)
+    db.commit()
 
 
 def key_status(client: Client) -> dict:
@@ -205,12 +281,22 @@ def key_status(client: Client) -> dict:
     }
 
 
-def list_clients_with_counters(db: Session, *, include_archived: bool = False) -> list[dict]:
+CLIENT_STATES = ("live", "archived", "deleted", "all")
+
+
+def list_clients_with_counters(db: Session, *, state: str = "live") -> list[dict]:
     """Список клиентов со счётчиками — SKU живых товаров, штук на складе, активных
-    заказов. Три агрегирующих запроса на весь список (без N+1 по клиентам)."""
+    заказов. Три агрегирующих запроса на весь список (без N+1 по клиентам).
+
+    state: live — живые; archived — живые + архивные (прежний include_archived);
+    deleted — только удалённые; all — все. deleted/all — только хосту (проверка в API)."""
     stmt = select(Client).order_by(Client.name)
-    if not include_archived:
+    if state == "live":
         stmt = stmt.where(Client.archived_at.is_(None))
+    elif state == "archived":
+        stmt = stmt.where(Client.deleted_at.is_(None))
+    elif state == "deleted":
+        stmt = stmt.where(Client.deleted_at.is_not(None))
     clients = list(db.scalars(stmt))
     if not clients:
         return []

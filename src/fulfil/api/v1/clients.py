@@ -1,7 +1,8 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
-from fulfil.auth import get_current_user
+from fulfil.auth import get_current_user, is_host, require_host
+from fulfil.errors import AppError, NotFoundError
 from fulfil.db import get_db
 from fulfil.integrations.wb import get_wb_client
 from fulfil.models.client import Client
@@ -21,6 +22,14 @@ def _actor(user: dict) -> str:
     return user.get("sub", "system")
 
 
+def _get_client(db: Session, client_id: int, user: dict) -> Client:
+    """Удалённый клиент для всех, кроме хоста, — как будто его нет (problems.txt, п.5)."""
+    client = clients_service.get_client_or_404(db, client_id)
+    if client.deleted_at is not None and not is_host(user):
+        raise NotFoundError(f"Клиент #{client_id} не найден.")
+    return client
+
+
 def _client_out(client: Client, counters: dict | None = None) -> ClientOut:
     status = clients_service.key_status(client)
     data = {
@@ -31,6 +40,8 @@ def _client_out(client: Client, counters: dict | None = None) -> ClientOut:
         "last_sync_at": client.last_sync_at,
         "last_sync_error": client.last_sync_error,
         "archived_at": client.archived_at,
+        "deleted_at": client.deleted_at,
+        "deleted_by": client.deleted_by,
         **status,
     }
     if counters:
@@ -43,8 +54,19 @@ def _client_out(client: Client, counters: dict | None = None) -> ClientOut:
 
 
 @router.get("", response_model=list[ClientOut])
-def list_clients(include_archived: bool = False, db: Session = Depends(get_db)) -> list[ClientOut]:
-    rows = clients_service.list_clients_with_counters(db, include_archived=include_archived)
+def list_clients(
+    state: str | None = None, include_archived: bool = False, db: Session = Depends(get_db),
+    user: dict = Depends(get_current_user),
+) -> list[ClientOut]:
+    """state=live|archived|deleted|all; include_archived=true — прежний алиас state=archived."""
+    state = state or ("archived" if include_archived else "live")
+    if state not in clients_service.CLIENT_STATES:
+        raise AppError(f"Неизвестный state «{state}».", status_code=400, reason_code="invalid_state")
+    if state in ("deleted", "all") and not is_host(user):
+        raise AppError(
+            "Удалённых клиентов видит только владелец системы.", status_code=403, reason_code="forbidden",
+        )
+    rows = clients_service.list_clients_with_counters(db, state=state)
     return [
         _client_out(
             row["client"],
@@ -68,7 +90,7 @@ def create_client(
 def update_client(
     client_id: int, body: ClientUpdateRequest, db: Session = Depends(get_db), user: dict = Depends(get_current_user)
 ) -> ClientOut:
-    client = clients_service.get_client_or_404(db, client_id)
+    client = _get_client(db, client_id, user)
     client = clients_service.update_client(
         db, client, name=body.name, api_key=body.api_key, wb_warehouse_id=body.wb_warehouse_id,
         wb_warehouse_name=body.wb_warehouse_name, actor=_actor(user),
@@ -78,22 +100,41 @@ def update_client(
 
 @router.delete("/{client_id}")
 def archive_client(client_id: int, db: Session = Depends(get_db), user: dict = Depends(get_current_user)) -> dict:
-    client = clients_service.get_client_or_404(db, client_id)
+    """Архивация — любой вошедший. Вернуть из архива может только хост (problems.txt, п.5)."""
+    client = _get_client(db, client_id, user)
     clients_service.archive_client(db, client, actor=_actor(user))
     return {"ok": True}
 
 
 @router.post("/{client_id}/restore", response_model=ClientOut)
-def restore_client(client_id: int, db: Session = Depends(get_db), user: dict = Depends(get_current_user)) -> ClientOut:
+def restore_client(client_id: int, db: Session = Depends(get_db), user: dict = Depends(require_host)) -> ClientOut:
     client = clients_service.get_client_or_404(db, client_id)
     client = clients_service.restore_client(db, client, actor=_actor(user))
     return _client_out(client)
 
 
-@router.post("/{client_id}/check")
-def check_connection(client_id: int, db: Session = Depends(get_db)) -> dict:
-    """«Проверить подключение» — best-effort ping обоих хостов WB API (Этап 1, п.1.4)."""
+@router.post("/{client_id}/delete", response_model=ClientOut)
+def delete_client(client_id: int, db: Session = Depends(get_db), user: dict = Depends(require_host)) -> ClientOut:
+    """Мягкое удаление — только хост: клиент скрыт от сотрудников, история остаётся."""
     client = clients_service.get_client_or_404(db, client_id)
+    client = clients_service.delete_client(db, client, actor=_actor(user))
+    return _client_out(client)
+
+
+@router.delete("/{client_id}/purge")
+def purge_client(client_id: int, db: Session = Depends(get_db), user: dict = Depends(require_host)) -> dict:
+    """Безвозвратно — только хост и только у клиента без истории (иначе 409)."""
+    client = clients_service.get_client_or_404(db, client_id)
+    clients_service.purge_client(db, client, actor=_actor(user))
+    return {"ok": True, "outcome": "deleted"}
+
+
+@router.post("/{client_id}/check")
+def check_connection(
+    client_id: int, db: Session = Depends(get_db), user: dict = Depends(get_current_user)
+) -> dict:
+    """«Проверить подключение» — best-effort ping обоих хостов WB API (Этап 1, п.1.4)."""
+    client = _get_client(db, client_id, user)
     wb_client = get_wb_client(client)
     return clients_service.check_connection(wb_client)
 

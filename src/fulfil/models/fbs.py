@@ -1,7 +1,7 @@
 import datetime as dt
 import enum
 
-from sqlalchemy import ForeignKey, String, Text, DateTime, func
+from sqlalchemy import BigInteger, ForeignKey, String, Text, DateTime, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from fulfil.db import Base
@@ -45,8 +45,9 @@ class Order(Base):
     # синхронизация берёт ТОЛЬКО заказы с warehouseId == client.wb_warehouse_id,
     # чужие склады продавца в базу вообще не попадают.
     wb_warehouse_id: Mapped[str | None] = mapped_column(String(64), index=True)
-    wb_nm_id: Mapped[int | None] = mapped_column(index=True)
-    wb_chrt_id: Mapped[int | None]
+    # BIGINT — те же идентификаторы WB, что в Product (см. комментарий там).
+    wb_nm_id: Mapped[int | None] = mapped_column(BigInteger, index=True)
+    wb_chrt_id: Mapped[int | None] = mapped_column(BigInteger)
     article: Mapped[str | None] = mapped_column(String(128))
     # Статусы самого WB (см. POST /api/v3/orders/status) — опрашиваются отдельно от
     # /orders/new, иначе отмена покупателем/доставка/приёмка до нас не доходят.

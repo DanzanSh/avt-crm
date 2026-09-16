@@ -13,6 +13,7 @@ class ProductOut(CamelModel):
     id: int
     client_id: int
     client_name: str | None = None
+    client_archived: bool = False
     barcode: str
     name: str
     brand: str | None = None

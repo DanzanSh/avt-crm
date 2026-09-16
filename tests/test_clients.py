@@ -284,3 +284,103 @@ def test_create_wb_warehouse_blocks_change_with_active_orders(db, seller):
     with pytest.raises(AppError) as exc_info:
         clients_service.create_wb_warehouse(db, seller, wb, name="Новый склад", office_id=1, actor="tester")
     assert exc_info.value.reason_code == "client_has_active_orders"
+
+
+# --- Восстановление только хостом и удаление клиента (problems.txt, п.5) ---
+
+
+def test_employee_archives_but_cannot_restore(api, db, seller):
+    from conftest import auth_headers, make_user
+
+    employee = make_user(db, "worker")
+    host = make_user(db, "owner", role="host")
+
+    assert api.delete(f"/api/v1/clients/{seller.id}", headers=auth_headers(employee)).status_code == 200
+    resp = api.post(f"/api/v1/clients/{seller.id}/restore", headers=auth_headers(employee))
+    assert resp.status_code == 403 and resp.json()["reasonCode"] == "forbidden"
+    assert api.post(f"/api/v1/clients/{seller.id}/delete", headers=auth_headers(employee)).status_code == 403
+
+    assert api.post(f"/api/v1/clients/{seller.id}/restore", headers=auth_headers(host)).status_code == 200
+    db.refresh(seller)
+    assert seller.archived_at is None
+
+
+def test_deleted_client_hidden_from_employee_visible_to_host(api, db, seller):
+    from conftest import auth_headers, make_user
+
+    employee = make_user(db, "worker")
+    host = make_user(db, "owner", role="host")
+    assert api.post(f"/api/v1/clients/{seller.id}/delete", headers=auth_headers(host)).status_code == 200
+
+    names = lambda resp: [c["name"] for c in resp.json()]  # noqa: E731
+    emp = auth_headers(employee)
+    assert names(api.get("/api/v1/clients", headers=emp)) == []
+    assert names(api.get("/api/v1/clients?state=archived", headers=emp)) == []
+    assert names(api.get("/api/v1/clients?include_archived=true", headers=emp)) == []
+    assert api.get("/api/v1/clients?state=deleted", headers=emp).status_code == 403
+    assert api.patch(f"/api/v1/clients/{seller.id}", json={"name": "x"}, headers=emp).status_code == 404
+
+    deleted = api.get("/api/v1/clients?state=deleted", headers=auth_headers(host)).json()
+    assert [c["name"] for c in deleted] == [seller.name]
+    assert deleted[0]["deletedBy"] == "owner"
+
+
+def test_deleted_client_rows_hidden_from_lists(db, seller):
+    from fulfil.services.products import list_products
+    from fulfil.services.receiving import create_receipt, get_receipt_counters, list_receipts
+
+    db.add(Product(client_id=seller.id, barcode="2000000000017", name="Майка"))
+    db.commit()
+    create_receipt(db, seller, expected_date=None, comment=None, actor="t")
+
+    clients_service.delete_client(db, seller, actor="owner")
+    assert seller.archived_at is not None  # удалённый всегда ещё и архивный
+    assert list_products(db, include_archived=True) == []
+    assert list_receipts(db) == []
+    assert get_receipt_counters(db)["expected"] == 0
+    assert clients_service.list_syncable_clients(db) == []
+
+
+def test_delete_client_blocked_with_stock(db, seller):
+    product = Product(client_id=seller.id, barcode="2000000000017", name="Майка")
+    db.add(product)
+    db.commit()
+    [cell] = generate_cells(db, "A", racks=1, cells_per_rack=1)
+    place_stock(db, product, cell, 1)
+
+    with pytest.raises(AppError) as exc_info:
+        clients_service.delete_client(db, seller, actor="owner")
+    assert exc_info.value.reason_code == "client_has_stock"
+
+
+def test_restore_deleted_client_and_name_reuse(db, seller):
+    clients_service.delete_client(db, seller, actor="owner")
+    # имя удалённого свободно
+    twin = clients_service.create_client(db, name=seller.name, actor="owner")
+    with pytest.raises(AppError) as exc_info:
+        clients_service.restore_client(db, seller, actor="owner")
+    assert exc_info.value.reason_code == "client_exists"
+
+    clients_service.archive_client(db, twin, actor="owner")
+    restored = clients_service.restore_client(db, seller, actor="owner")
+    assert restored.deleted_at is None and restored.archived_at is None
+
+
+def test_purge_client(db, seller):
+    from fulfil.models.audit import AuditLog
+
+    other = make_client(db, name="Пустой")
+    db.add(IntegrationState(key=f"wb.product_cards:{other.id}", cursor={}))
+    db.add(Product(client_id=seller.id, barcode="2000000000017", name="Майка"))
+    db.commit()
+
+    with pytest.raises(AppError) as exc_info:
+        clients_service.purge_client(db, seller, actor="owner")
+    assert exc_info.value.reason_code == "client_has_history"
+    assert exc_info.value.extra["history"]["products"] == 1
+
+    other_id = other.id
+    clients_service.purge_client(db, other, actor="owner")
+    assert db.get(Client, other_id) is None
+    assert db.get(IntegrationState, f"wb.product_cards:{other_id}") is None
+    assert db.query(AuditLog).filter_by(entity_type="client", entity_id=other_id, action="purge").count() == 1
