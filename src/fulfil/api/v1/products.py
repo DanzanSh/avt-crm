@@ -16,6 +16,7 @@ from fulfil.schemas.product import (
 )
 from fulfil.services import clients as clients_service
 from fulfil.services import products as products_service
+from fulfil.services import stock as stock_service
 
 router = APIRouter(prefix="/products", tags=["products"], dependencies=[Depends(get_current_user)])
 
@@ -30,10 +31,22 @@ def list_products(
     name: str | None = None, size: str | None = None, color: str | None = None,
     brand: str | None = None, db: Session = Depends(get_db),
 ) -> list[Product]:
-    return products_service.list_products(
+    products = products_service.list_products(
         db, search=search, include_archived=include_archived, client_id=client_id,
         name=name, size=size, color=color, brand=brand,
     )
+    # Остаток в карточке товара (Этап 6, п.6.2): два агрегирующих запроса на
+    # весь список — list_stock_summaries()/list_stock_by_cell() (Этап 2) — а не
+    # get_stock_summary()/get_stock_by_cell() в цикле по каждому товару.
+    # Атрибуты не персистентные (не mapped columns) — только для сериализации
+    # в ProductOut этим же ответом, коммитить их некуда и незачем.
+    summaries = stock_service.list_stock_summaries(db, client_id=client_id)
+    by_cell = stock_service.list_stock_by_cell(db, client_id=client_id)
+    for p in products:
+        summary = summaries.get(p.id)
+        p.stock_total = summary["total"] if summary else 0
+        p.cells = by_cell.get(p.id, [])
+    return products
 
 
 # Объявлено ДО "/{product_id}": иначе FastAPI разберёт "filter-options" как

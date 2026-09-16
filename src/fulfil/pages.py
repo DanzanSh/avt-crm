@@ -21,6 +21,7 @@ class PageDef:
 
 
 PAGES: list[PageDef] = [
+    PageDef("dashboard", "/dashboard.html", "Главная", "Главная"),
     PageDef("storage", "/storage-map.html", "Карта склада", "Склад"),
     PageDef("receiving", "/receiving.html", "Приёмка", "Склад"),
     PageDef("stock", "/stock.html", "Остатки", "Склад"),

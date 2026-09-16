@@ -190,6 +190,13 @@ def restore_client(db: Session, client: Client, actor: str) -> Client:
 def key_status(client: Client) -> dict:
     now = dt.datetime.now(dt.timezone.utc)
     expires_at = client.wb_token_expires_at
+    # SQLite (юнит-тесты, tests/conftest.py) не хранит tzinfo — DateTime(timezone=True)
+    # после перечитывания из БД возвращает наивное значение, и вычитание из
+    # aware `now` падает. На Postgres (прод) значение остаётся aware; naive
+    # трактуем как UTC — так его и писали (Client.wb_token_expires_at всегда
+    # заполняется из aware jwt_expires_at, см. secrets.py).
+    if expires_at is not None and expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=dt.timezone.utc)
     return {
         "hasApiKey": bool(client.wb_api_key_enc),
         "wbTokenExpiresAt": expires_at,

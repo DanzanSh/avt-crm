@@ -137,7 +137,8 @@
     // ============================= СПИСОК =============================
 
     if (!receiptId) {
-      let currentGroup = 'expected';
+      // Дашборд ссылается сюда с ?group=... (Этап 6, п.6.3).
+      let currentGroup = params.get('group') || 'expected';
 
       function renderTabs(counters) {
         counters = counters || {};

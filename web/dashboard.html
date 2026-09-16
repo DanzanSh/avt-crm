@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Главная — Fulfil</title>
+  <link rel="stylesheet" href="/css/theme.css" />
+  <script src="/js/core.js"></script>
+  <style>
+    .section-title { font-size: 18px; font-weight: 700; color: var(--text); margin: 24px 0 12px; }
+    .section-title:first-of-type { margin-top: 0; }
+    .kpi-row { display: flex; gap: 12px; flex-wrap: wrap; }
+    .kpi-row .stat-card { min-width: 150px; flex: 1 1 150px; }
+    a.kpi-link { text-decoration: none; display: block; }
+    a.kpi-link:hover .stat-card { filter: brightness(1.05); }
+
+    .bars-card { padding: 16px; }
+    .bar-row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+    .bar-row:last-child { margin-bottom: 0; }
+    .bar-label { flex: 0 0 170px; font-size: 15px; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .bar-track { flex: 1; height: 10px; background: var(--bg2); border-radius: 6px; overflow: hidden; }
+    .bar-fill { height: 100%; background: var(--blue); border-radius: 6px; }
+    .bar-value { flex: 0 0 auto; font-size: 14px; color: var(--text); font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+    .attention-list { display: flex; flex-direction: column; gap: 8px; }
+    .attention-item {
+      display: flex; align-items: center; justify-content: space-between; gap: 12px;
+      padding: 11px 14px; border-radius: var(--radius-sm); border: 1px solid var(--border);
+      background: var(--card); text-decoration: none; color: var(--text);
+    }
+    .attention-item:hover { background: var(--row-hover); }
+    .attention-item.severity-high { border-left: 4px solid var(--red); }
+    .attention-item.severity-medium { border-left: 4px solid var(--orange); }
+    .attention-item .go { color: var(--blue); font-size: 14px; flex: none; }
+    .two-col { display: flex; gap: 16px; flex-wrap: wrap; }
+    .two-col > * { flex: 1 1 320px; min-width: 280px; }
+  </style>
+</head>
+<body>
+  <div class="page-head">
+    <h1 class="page-title">Главная</h1>
+  </div>
+
+  <div id="clientFilterMount" style="margin-bottom: 18px;"></div>
+
+  <div class="section-title">Показатели</div>
+  <div class="kpi-row" id="kpiRow">Загрузка…</div>
+
+  <div class="two-col">
+    <div>
+      <div class="section-title">Крупнейшие клиенты по остаткам</div>
+      <div class="card bars-card" id="topClients"></div>
+    </div>
+    <div>
+      <div class="section-title">Заполненность по секциям</div>
+      <div class="card bars-card" id="zoneFill"></div>
+    </div>
+  </div>
+
+  <div class="section-title">Требует внимания</div>
+  <div class="attention-list" id="attention"></div>
+
+  <script src="/js/sidebar.js"></script>
+  <script>
+    const SEVERITY = {
+      sync_error: 'high',
+      key_expired: 'high',
+      blocked_cells: 'high',
+      unknown_sku: 'medium',
+      key_expiring: 'medium',
+      fbs_oversold: 'medium',
+    };
+
+    function kpi(label, value, link) {
+      const inner = `
+        <div class="card stat-card">
+          <span class="stat-card__label">${Fulfil.esc(label)}</span>
+          <span class="stat-card__value">${value}</span>
+        </div>`;
+      return link ? `<a class="kpi-link" href="${link}">${inner}</a>` : inner;
+    }
+
+    function renderKpis(s) {
+      const el = document.getElementById('kpiRow');
+      const st = s.stockTotals;
+      const o = s.orders;
+      const sup = s.supplies;
+      const r = s.receipts;
+      el.innerHTML = [
+        kpi('Штук на складе', st.totalQty, '/stock.html'),
+        kpi('SKU с остатком', st.skuWithStock, '/products.html'),
+        kpi('Заполненность мест', st.cellsFillPercent + '%', '/storage-map.html'),
+        kpi('Заказы: новые', o.new, '/fbs/orders.html?group=new'),
+        kpi('Заказы: на сборке', o.assembly, '/fbs/orders.html?group=assembly'),
+        kpi('Заказы: собранные', o.packed, '/fbs/orders.html?group=packed'),
+        kpi('Поставки: на сборке', sup.assembly, '/fbs/supplies.html?group=assembly'),
+        kpi('Поставки: в доставке', sup.inDelivery, '/fbs/supplies.html?group=in_delivery'),
+        kpi('Приёмки: ожидаются', r.expected, '/receiving.html?group=expected'),
+        kpi('Приёмки: в работе', r.inProgress, '/receiving.html?group=in_progress'),
+      ].join('');
+    }
+
+    function barsHtml(rows, { emptyText }) {
+      if (!rows.length) return `<div class="empty-state">${emptyText}</div>`;
+      const max = Math.max(...rows.map((r) => r.value), 1);
+      return rows
+        .map(
+          (r) => `
+        <div class="bar-row">
+          <span class="bar-label" title="${Fulfil.esc(r.label)}">${Fulfil.esc(r.label)}</span>
+          <div class="bar-track"><div class="bar-fill" style="width:${Math.round((r.value / max) * 100)}%"></div></div>
+          <span class="bar-value">${r.value}</span>
+        </div>`
+        )
+        .join('');
+    }
+
+    function renderTopClients(list) {
+      const rows = (list || []).map((c) => ({ label: c.clientName, value: c.qty }));
+      document.getElementById('topClients').innerHTML = barsHtml(rows, { emptyText: 'Пока нет остатков' });
+    }
+
+    function renderZoneFill(list) {
+      const rows = (list || []).map((z) => ({
+        label: `Секция ${z.zoneName ? z.zoneName + ' (' + z.zoneCode + ')' : z.zoneCode}`,
+        value: z.occupied,
+        total: z.total,
+      }));
+      const el = document.getElementById('zoneFill');
+      if (!rows.length) {
+        el.innerHTML = '<div class="empty-state">На складе пока нет секций</div>';
+        return;
+      }
+      el.innerHTML = rows
+        .map(
+          (r) => `
+        <div class="bar-row">
+          <span class="bar-label" title="${Fulfil.esc(r.label)}">${Fulfil.esc(r.label)}</span>
+          <div class="bar-track"><div class="bar-fill" style="width:${r.total ? Math.round((r.value / r.total) * 100) : 0}%"></div></div>
+          <span class="bar-value">${r.value} / ${r.total}</span>
+        </div>`
+        )
+        .join('');
+    }
+
+    function renderAttention(items) {
+      const el = document.getElementById('attention');
+      if (!items.length) {
+        el.innerHTML = '<div class="empty-state">Всё в порядке — нет пунктов, требующих внимания</div>';
+        return;
+      }
+      el.innerHTML = items
+        .map((it) => {
+          const sev = SEVERITY[it.type] || 'medium';
+          return `
+        <a class="attention-item severity-${sev}" href="${it.link}">
+          <span>${Fulfil.esc(it.message)}</span>
+          <span class="go">Перейти →</span>
+        </a>`;
+        })
+        .join('');
+    }
+
+    async function load() {
+      try {
+        const q = Fulfil.clientFilter.clientId ? `?client_id=${Fulfil.clientFilter.clientId}` : '';
+        const s = await Fulfil.api('GET', '/dashboard/summary' + q);
+        renderKpis(s);
+        renderTopClients(s.topClientsByStock);
+        renderZoneFill(s.zoneFill);
+        renderAttention(s.attention || []);
+      } catch (err) {
+        document.getElementById('kpiRow').innerHTML =
+          `<div class="empty-state">${Fulfil.esc(Fulfil.errorText(err))}</div>`;
+      }
+    }
+
+    Fulfil.clientFilter.mount(document.getElementById('clientFilterMount'), load).then(load);
+    setInterval(load, 60000);
+  </script>
+</body>
+</html>

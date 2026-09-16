@@ -27,6 +27,15 @@
     .product-meta .meta-item { white-space: nowrap; }
     .product-meta .meta-label { color: var(--muted); }
     .product-meta .meta-value { color: var(--text-2); font-weight: 600; }
+    /* 6.2 — остаток в карточке товара: «На складе N шт · На WB M · адрес (qty), …». */
+    .product-stock { font-size: 14px; color: var(--text-2); }
+    /* 6.2 — итоговая плашка над списком: два KPI + карточка топ-клиентов. */
+    .summary-row { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 18px; }
+    .summary-row .stat-card { min-width: 170px; flex: 0 0 auto; }
+    .top-clients-card { padding: 14px; flex: 1 1 240px; min-width: 220px; }
+    .top-clients-title { font-size: 13px; font-weight: 600; color: var(--muted); margin-bottom: 8px; }
+    .top-clients-row { display: flex; justify-content: space-between; gap: 10px; font-size: 15px; color: var(--text); padding: 2px 0; }
+    .top-clients-row.muted { color: var(--muted); }
     .card-actions { display: flex; gap: 8px; flex-wrap: wrap; }
     .modal { width: 420px; max-height: 85vh; }
     .field-row { display: flex; gap: 8px; align-items: center; }
@@ -84,6 +93,8 @@
       <button class="btn btn-primary" id="btnSync">Синхронизировать с WB</button>
     </div>
   </div>
+
+  <div class="summary-row" id="summaryRow"></div>
 
   <div class="search-row">
     <div id="clientFilterMount"></div>
@@ -206,7 +217,41 @@
      *  набор значений (правка/создание товара, синк с WB, архивация), а не только
      *  выдача — иначе в фильтре останется бренд, которого уже нет. */
     function reloadAll() {
-      return loadFilterOptions().then(load);
+      return Promise.all([loadFilterOptions().then(load), loadSummary()]);
+    }
+
+    // 6.2 — итоговая плашка: «Всего на складе», «Артикулов с остатком» (с учётом
+    // фильтра клиента) и «Крупнейшие клиенты по остаткам» (топ-3, всегда по всем
+    // клиентам — согласовано с заказчиком, фильтр её не сужает).
+    async function loadSummary() {
+      const el = document.getElementById('summaryRow');
+      try {
+        const q = Fulfil.clientFilter.clientId ? `?client_id=${Fulfil.clientFilter.clientId}` : '';
+        const s = await Fulfil.api('GET', '/dashboard/summary' + q);
+        const top = s.topClientsByStock || [];
+        el.innerHTML = `
+          <div class="card stat-card">
+            <span class="stat-card__label">Всего на складе</span>
+            <span class="stat-card__value">${s.stockTotals.totalQty} шт</span>
+          </div>
+          <div class="card stat-card">
+            <span class="stat-card__label">Артикулов с остатком</span>
+            <span class="stat-card__value">${s.stockTotals.skuWithStock}</span>
+          </div>
+          <div class="card top-clients-card">
+            <div class="top-clients-title">Крупнейшие клиенты по остаткам</div>
+            ${top.length
+              ? top
+                  .map(
+                    (c, i) =>
+                      `<div class="top-clients-row"><span>${i + 1}. ${Fulfil.esc(c.clientName)}</span><span>${c.qty} шт</span></div>`
+                  )
+                  .join('')
+              : '<div class="top-clients-row muted">Пока нет остатков</div>'}
+          </div>`;
+      } catch (err) {
+        el.innerHTML = '';
+      }
     }
 
     async function load() {
@@ -279,6 +324,19 @@
           metaField('Цвет', p.color, 'color');
           metaField('nmID WB', p.wbNmId);
 
+          // 6.2 — остаток в карточке товара: «На складе N шт · На WB M · адрес
+          // (qty), …» — до трёх ячеек, дальше «+K» вместо полного списка.
+          const cells = p.cells || [];
+          const shownCells = cells.slice(0, 3).map((c) => `${Fulfil.esc(c.cellAddress)} (${c.qty})`).join(', ');
+          const restCells = cells.length > 3 ? ` +${cells.length - 3}` : '';
+          const stockLine = [
+            `На складе ${p.stockTotal || 0} шт`,
+            `На WB ${p.wbFbsAmount || 0}`,
+            shownCells ? shownCells + restCells : null,
+          ]
+            .filter(Boolean)
+            .join(' · ');
+
           const actions = p.archivedAt
             ? `<button class="btn btn-restore" data-id="${p.id}">Восстановить</button>`
             : `<button class="btn btn-edit" data-id="${p.id}">Изменить</button>
@@ -299,6 +357,7 @@
           <div class="product-content">
             <div class="product-name">${Fulfil.esc(p.name)}${mark('name')}${p.archivedAt ? ' <span class="badge badge-muted">архив</span>' : ''}</div>
             <div class="list-card__meta product-meta">${meta.join('')}</div>
+            <div class="product-stock">${stockLine}</div>
             <div class="card-actions">${actions}</div>
           </div>
         </div>`;

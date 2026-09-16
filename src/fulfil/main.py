@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from fulfil import jobs
-from fulfil.api.v1 import audit, auth, clients, fbs, products, receiving, scan, settings_, stock, storage
+from fulfil.api.v1 import audit, auth, clients, dashboard, fbs, products, receiving, scan, settings_, stock, storage
 from fulfil.errors import AppError, app_error_handler
 
 
@@ -27,6 +27,7 @@ app.include_router(auth.router, prefix="/api/v1")
 app.include_router(settings_.router, prefix="/api/v1")
 app.include_router(storage.router, prefix="/api/v1")
 app.include_router(clients.router, prefix="/api/v1")
+app.include_router(dashboard.router, prefix="/api/v1")
 app.include_router(products.router, prefix="/api/v1")
 app.include_router(receiving.router, prefix="/api/v1")
 app.include_router(stock.router, prefix="/api/v1")

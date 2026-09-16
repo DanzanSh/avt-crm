@@ -65,8 +65,14 @@
       { key: 'other', label: 'Прочие' },
     ];
 
-    let currentGroup = 'assembly';
+    // Дашборд ссылается сюда с ?group=... (Этап 6, п.6.3).
+    let currentGroup = new URLSearchParams(location.search).get('group') || 'assembly';
     const expanded = new Set();
+    // /fbs/supplies/counters отдаёт camelCase (CamelModel) — «in_delivery» приходит
+    // как «inDelivery». TABS.key совпадает со значением group-фильтра (snake_case,
+    // так его ждёт бэкенд), поэтому для чтения счётчика нужен отдельный алиас,
+    // а не переименование самого TABS.key.
+    const COUNTER_KEY_ALIAS = { in_delivery: 'inDelivery' };
 
     function renderTabs(counters) {
       counters = counters || {};
@@ -75,7 +81,7 @@
         (t) => `
         <div class="card stat-card tab-tile${currentGroup === t.key ? ' active' : ''}" data-group="${t.key}">
           <span class="stat-card__label">${t.label}</span>
-          <span class="stat-card__value">${counters[t.key] || 0}</span>
+          <span class="stat-card__value">${counters[COUNTER_KEY_ALIAS[t.key] || t.key] || 0}</span>
         </div>`
       ).join('');
       el.querySelectorAll('.tab-tile').forEach((tile) =>

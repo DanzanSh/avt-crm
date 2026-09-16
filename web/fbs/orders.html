@@ -107,7 +107,9 @@
       { key: 'packed', label: 'Собранные' },
     ];
 
-    let currentGroup = 'new';
+    // Дашборд ссылается сюда с ?group=... (Этап 6, п.6.3 — «каждое число ведёт
+    // на страницу с фильтром»); без параметра — прежнее поведение по умолчанию.
+    let currentGroup = new URLSearchParams(location.search).get('group') || 'new';
     const selected = new Set();
 
     // Пагинация — как в разделе «Товары» (web/products.html): целиком на клиенте,
