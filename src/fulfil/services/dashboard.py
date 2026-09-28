@@ -100,21 +100,35 @@ def zone_fill(db: Session) -> list[dict]:
     ]
 
 
+# Подписи «Требует внимания» по значению orders.problem (п.6.3.4).
+_PROBLEM_ATTENTION = {
+    "unknown_sku": ("Заказов с нераспознанным товаром: {n}", "/fbs/orders.html"),
+    orders_service.PROBLEM_SHIPPED_OUTSIDE: (
+        "Заказов, отгружённых на WB без сборки у нас: {n}",
+        "/fbs/orders.html?group=archive",
+    ),
+}
+
+
 def _attention_items(db: Session) -> list[dict]:
     """«Требует внимания» (п.6.3.4) — сквозь всех клиентов, фильтр «Товаров»/
     дашборда сюда не применяется: это список того, что нужно разобрать вручную,
     а не срез по одному кабинету."""
     items: list[dict] = []
 
-    problems = db.scalar(select(func.count()).select_from(Order).where(Order.problem.is_not(None))) or 0
-    if problems:
-        items.append(
-            {
-                "type": "unknown_sku",
-                "message": f"Заказов с нераспознанным товаром: {problems}",
-                "link": "/fbs/orders.html",
-            }
+    # По типу проблемы, а не одним COUNT(problem IS NOT NULL): с появлением
+    # 'shipped_outside' (заказ отгружён в личном кабинете WB минуя нас) подпись
+    # «нераспознанный товар» на общем числе стала бы врать.
+    problem_rows = db.execute(
+        select(Order.problem, func.count())
+        .where(Order.problem.is_not(None))
+        .group_by(Order.problem)
+    ).all()
+    for problem, count in problem_rows:
+        message, link = _PROBLEM_ATTENTION.get(
+            problem, (f"Заказов с проблемой «{problem}»: {{n}}", "/fbs/orders.html")
         )
+        items.append({"type": problem, "message": message.format(n=count), "link": link})
 
     for row in clients_service.list_clients_with_counters(db):
         client: Client = row["client"]

@@ -39,18 +39,9 @@ def sync_orders(client_id: int | None = None, db: Session = Depends(get_db)) -> 
     останавливает остальных."""
     if client_id is not None:
         client = clients_service.get_live_client_or_404(db, client_id)
-        wb_client = get_wb_client(client)
-        try:
-            created = orders_service.sync_orders_from_wb(db, client, wb_client)
-            orders_service.refresh_order_statuses(db, client, wb_client)
-            results = [
-                {"clientId": client.id, "clientName": client.name, "created": len(created), "error": None}
-            ]
-        except AppError as exc:
-            db.rollback()
-            results = [
-                {"clientId": client.id, "clientName": client.name, "created": 0, "error": exc.detail}
-            ]
+        # Та же строка результата, что и у синка по всем кабинетам (created +
+        # updated + error) — иначе тост по одному кабинету врал бы про статусы.
+        results = [orders_service.sync_client_orders(db, client, get_wb_client(client))]
     else:
         results = orders_service.sync_orders(db)
     return {"results": results}

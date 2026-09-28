@@ -101,6 +101,13 @@
       rejected_no_stock: ['Нет остатка', 'badge-red'],
     };
 
+    const PROBLEM_LABELS = {
+      unknown_sku: ['Неизвестный товар', 'badge-red'],
+      // Заказ провели в личном кабинете WB минуя нас — сборки не было, значит
+      // остаток со склада не списан, списывает кладовщик вручную.
+      shipped_outside: ['Отгружен мимо нас', 'badge-orange'],
+    };
+
     const TABS = [
       { key: 'new', label: 'Новые' },
       { key: 'assembly', label: 'На сборке' },
@@ -170,6 +177,12 @@
           ${thumb}
           <span class="item-text">${Fulfil.esc(name)}${size} × ${it.qty}</span>
         </div>`;
+    }
+
+    function problemBadgeHtml(problem) {
+      if (!problem) return '';
+      const [label, cls] = PROBLEM_LABELS[problem] || [problem, 'badge-red'];
+      return `<span class="badge ${cls}">${Fulfil.esc(label)}</span>`;
     }
 
     async function loadCounters() {
@@ -242,7 +255,7 @@
                   <div class="order-id">${Fulfil.esc(o.wbOrderId)}</div>
                   <span class="badge badge-muted">${Fulfil.esc(o.clientName || '')}</span>
                   <span class="badge ${cls}">${label}</span>
-                  ${o.problem ? '<span class="badge badge-red">Неизвестный товар</span>' : ''}
+                  ${problemBadgeHtml(o.problem)}
                 </div>
                 ${o.items.map(itemRowHtml).join('')}
                 ${actions ? `<div class="card-actions">${actions}</div>` : ''}
@@ -341,7 +354,7 @@
           Fulfil.toast('Нет клиентов с ключом API и выбранным складом для синхронизации', 'error');
         } else {
           res.results.forEach((r) => {
-            const msg = r.error ? `${r.clientName}: ошибка — ${r.error}` : `${r.clientName}: новых заказов ${r.created}`;
+            const msg = r.error ? `${r.clientName}: ошибка — ${r.error}` : `${r.clientName}: новых заказов ${r.created}, обновлено статусов ${r.updated ?? 0}`;
             Fulfil.toast(msg, r.error ? 'error' : 'success');
           });
         }

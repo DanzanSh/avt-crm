@@ -114,6 +114,26 @@ def test_dashboard_summary_attention_items(db, seller):
     assert types == {"unknown_sku", "sync_error", "key_expired", "fbs_oversold", "blocked_cells"}
 
 
+def test_dashboard_attention_splits_problems_by_type(db, seller):
+    """Подпись «нераспознанный товар» на общем COUNT(problem IS NOT NULL) врала бы:
+    заказ, отгружённый на WB без сборки у нас, — другая проблема и другой разбор."""
+    db.add(Order(client_id=seller.id, wb_order_id="ORD-U", status=OrderStatus.NEW, problem="unknown_sku"))
+    db.add(
+        Order(
+            client_id=seller.id,
+            wb_order_id="ORD-S",
+            status=OrderStatus.SHIPPED,
+            problem="shipped_outside",
+        )
+    )
+    db.commit()
+
+    items = {item["type"]: item for item in get_dashboard_summary(db)["attention"]}
+    assert items["unknown_sku"]["message"] == "Заказов с нераспознанным товаром: 1"
+    assert items["shipped_outside"]["message"] == "Заказов, отгружённых на WB без сборки у нас: 1"
+    assert items["shipped_outside"]["link"] == "/fbs/orders.html?group=archive"
+
+
 def test_dashboard_summary_counters_are_camel_case_and_client_scoped(db, seller):
     order = Order(client_id=seller.id, wb_order_id="ORD-2", status=OrderStatus.NEW)
     db.add(order)

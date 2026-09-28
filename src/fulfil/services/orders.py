@@ -27,18 +27,49 @@ from fulfil.services.stock_ledger import apply_move
 
 # Заказы, чей исход на WB ещё не известен — опрашиваются статусом отдельно от
 # /orders/new (Этап 3, п.3.1): без этого отмена покупателем, «в доставке» и
-# «принята» до нас не доходят вообще.
+# «принята» до нас не доходят вообще. SHIPPED тоже опрашивается: отгруженный
+# нами заказ должен дойти до DELIVERED, а раньше выборка кончалась на IN_SUPPLY
+# и ветка "sold" для него была недостижима.
 _INCOMPLETE_STATUSES = (
     OrderStatus.NEW,
     OrderStatus.CONFIRMED,
     OrderStatus.IN_ASSEMBLY,
     OrderStatus.PACKED,
     OrderStatus.IN_SUPPLY,
+    OrderStatus.SHIPPED,
 )
 _WB_CANCELLED_STATUSES = {"canceled", "canceled_by_client", "declined_by_client"}
-# best-effort (см. предупреждение в шапке integrations/wb/http.py): точное имя
-# терминального статуса "доставлен/выкуплен" не проверено против боевого токена.
-_WB_DELIVERED_STATUSES = {"sold"}
+
+# Стадия, до которой заказ дошёл ЛОКАЛЬНО. Словарь WB грубее нашего (CONFIRMED,
+# IN_ASSEMBLY и PACKED — все они supplierStatus "confirm"), поэтому статусы WB
+# только ПОДТЯГИВАЮТ заказ вперёд по стадиям и никогда не откатывают назад:
+# иначе опрос статусов сбрасывал бы собранный заказ обратно в «подтверждён».
+_STAGE_RANK = {
+    OrderStatus.NEW: 0,
+    OrderStatus.CONFIRMED: 1,
+    OrderStatus.IN_ASSEMBLY: 2,
+    OrderStatus.PACKED: 3,
+    OrderStatus.IN_SUPPLY: 4,
+    OrderStatus.SHIPPED: 5,
+    OrderStatus.DELIVERED: 6,
+}
+# best-effort (см. предупреждение в шапке integrations/wb/http.py и
+# docs/wb-api-contract.md): набор значений WB не проверен против боевого токена,
+# поэтому неизвестное значение НЕ двигает статус, а не падает.
+_WB_STATUS_STAGE = {
+    "sorted": OrderStatus.SHIPPED,
+    "ready_for_pickup": OrderStatus.SHIPPED,
+    "sold": OrderStatus.DELIVERED,
+}
+_SUPPLIER_STATUS_STAGE = {
+    "confirm": OrderStatus.CONFIRMED,
+    "complete": OrderStatus.SHIPPED,
+}
+# Стадии, на которых заказ у нас ещё не собран: если WB говорит, что он уже
+# отгружен, значит его провели в личном кабинете WB минуя нас, и остаток со
+# склада не списывался (problem='shipped_outside', списывает кладовщик).
+_UNPICKED_STAGES = (OrderStatus.NEW, OrderStatus.CONFIRMED, OrderStatus.IN_ASSEMBLY)
+PROBLEM_SHIPPED_OUTSIDE = "shipped_outside"
 
 _ARCHIVE_STATUSES = (
     OrderStatus.SHIPPED,
@@ -180,16 +211,44 @@ def _return_cancelled_order_stock(db: Session, order: Order, actor: str) -> None
         )
 
 
+def _wb_target_status(
+    current: OrderStatus, wb_status: str | None, supplier_status: str | None
+) -> OrderStatus | None:
+    """Локальный статус, выведенный из статусов WB, или None, если двигать нечего.
+
+    Отмена бьёт любую стадию — её ставит только WB, и обратной операции нет. Всё
+    остальное — движение ВПЕРЁД по _STAGE_RANK: WB не различает наши CONFIRMED /
+    IN_ASSEMBLY / PACKED, поэтому его "confirm" не должен сбрасывать собранный
+    заказ обратно в «подтверждён»."""
+    if wb_status in _WB_CANCELLED_STATUSES:
+        return None if current == OrderStatus.CANCELLED else OrderStatus.CANCELLED
+    stages = [
+        s
+        for s in (_WB_STATUS_STAGE.get(wb_status or ""), _SUPPLIER_STATUS_STAGE.get(supplier_status or ""))
+        if s is not None
+    ]
+    if not stages:
+        return None
+    target = max(stages, key=lambda s: _STAGE_RANK[s])
+    if _STAGE_RANK[target] <= _STAGE_RANK.get(current, 0):
+        return None
+    return target
+
+
 def refresh_order_statuses(db: Session, client: Client, wb_client: WBClient) -> dict:
     """Опрашивает статус наших НЕЗАВЕРШЁННЫХ заказов (Этап 3, п.3.1) — раньше
-    опрашивался только /orders/new, поэтому отмена покупателем до нас не доходила."""
+    опрашивался только /orders/new, поэтому отмена покупателем до нас не доходила.
+
+    Статусы WB не просто записываются в wb_status/supplier_status, но и двигают
+    локальный статус: заказ, подтверждённый или отгруженный в личном кабинете WB
+    минуя Fulfil, иначе навсегда оставался «Новым» и висел в плитке «Новые»."""
     orders = list(
         db.scalars(
             select(Order).where(Order.client_id == client.id, Order.status.in_(_INCOMPLETE_STATUSES))
         )
     )
     if not orders:
-        return {"checked": 0, "cancelled": 0}
+        return {"checked": 0, "cancelled": 0, "advanced": 0, "shippedOutside": 0}
 
     try:
         statuses = wb_client.get_order_statuses([o.wb_order_id for o in orders])
@@ -199,32 +258,72 @@ def refresh_order_statuses(db: Session, client: Client, wb_client: WBClient) -> 
         raise
 
     cancelled = 0
+    advanced = 0
+    shipped_outside = 0
     for order in orders:
         st = statuses.get(order.wb_order_id)
         if st is None:
             continue
         order.wb_status = st.get("wbStatus")
         order.supplier_status = st.get("supplierStatus")
-        if order.wb_status in _WB_CANCELLED_STATUSES and order.status != OrderStatus.CANCELLED:
+        target = _wb_target_status(order.status, order.wb_status, order.supplier_status)
+        if target is None:
+            continue
+        if target == OrderStatus.CANCELLED:
             was_packed = order.status == OrderStatus.PACKED
             _release_unpicked_pick_lines(db, order)
             order.status = OrderStatus.CANCELLED
             if was_packed:
                 _return_cancelled_order_stock(db, order, actor="wb-sync")
             cancelled += 1
-        elif (
-            order.wb_status in _WB_DELIVERED_STATUSES
-            and order.status not in (OrderStatus.DELIVERED, OrderStatus.CANCELLED)
-        ):
-            # Жизненный цикл заказа раньше не доходил до конца (P1-6): статус
-            # опрашивался только на отмену, "доставлен" никогда не выставлялся,
-            # и заказ навсегда оставался в SHIPPED/PACKED в архиве.
-            order.status = OrderStatus.DELIVERED
+            continue
+        if target in (OrderStatus.SHIPPED, OrderStatus.DELIVERED) and order.status in _UNPICKED_STAGES:
+            # Заказ уехал на WB, а у нас сборки по нему не было — значит остаток
+            # со склада не списывался. Сами его НЕ списываем (не знаем, из какой
+            # ячейки физически ушёл товар): помечаем заказ, разбирается кладовщик.
+            order.problem = PROBLEM_SHIPPED_OUTSIDE
+            _release_unpicked_pick_lines(db, order)
+            shipped_outside += 1
+        order.status = target
+        advanced += 1
 
     client.last_sync_at = dt.datetime.now(dt.timezone.utc)
     client.last_sync_error = None
     db.commit()
-    return {"checked": len(orders), "cancelled": cancelled}
+    return {
+        "checked": len(orders),
+        "cancelled": cancelled,
+        "advanced": advanced,
+        "shippedOutside": shipped_outside,
+    }
+
+
+def sync_client_orders(db: Session, client: Client, wb_client: WBClient) -> dict:
+    """Один кабинет: импорт новых заказов + опрос статусов уже загруженных, одной
+    строкой результата для тоста «Обновить из WB». Ошибка кабинета не бросается
+    наружу — она уходит в строку результата, чтобы синк остальных не вставал."""
+    try:
+        created = sync_orders_from_wb(db, client, wb_client)
+        refreshed = refresh_order_statuses(db, client, wb_client)
+    except AppError as exc:
+        db.rollback()
+        return {
+            "clientId": client.id,
+            "clientName": client.name,
+            "created": 0,
+            "updated": 0,
+            "error": exc.detail,
+        }
+    return {
+        "clientId": client.id,
+        "clientName": client.name,
+        "created": len(created),
+        # Сколько заказов подтянули статус из WB (подтверждён/отгружён/доставлен/
+        # отменён в личном кабинете WB минуя нас) — без этого числа правка статусов
+        # никак не видна в интерфейсе.
+        "updated": refreshed["advanced"] + refreshed["cancelled"],
+        "error": None,
+    }
 
 
 def sync_orders(db: Session) -> list[dict]:
@@ -235,18 +334,19 @@ def sync_orders(db: Session) -> list[dict]:
     for client in list_syncable_clients(db):
         try:
             wb_client = get_wb_client(client)
-            created = sync_orders_from_wb(db, client, wb_client)
-            refresh_order_statuses(db, client, wb_client)
-            results.append(
-                {"clientId": client.id, "clientName": client.name, "created": len(created), "error": None}
-            )
         except AppError as exc:
-            db.rollback()
             results.append(
-                {"clientId": client.id, "clientName": client.name, "created": 0, "error": exc.detail}
+                {
+                    "clientId": client.id,
+                    "clientName": client.name,
+                    "created": 0,
+                    "updated": 0,
+                    "error": exc.detail,
+                }
             )
+            continue
+        results.append(sync_client_orders(db, client, wb_client))
     return results
-
 
 def _find_or_create_open_supply(db: Session, client: Client, wb_client: WBClient) -> Supply:
     supply = db.scalar(

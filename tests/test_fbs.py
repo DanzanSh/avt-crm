@@ -15,6 +15,7 @@ from fulfil.services.orders import (
     get_order_counters,
     list_orders,
     refresh_order_statuses,
+    sync_client_orders,
     sync_orders_from_wb,
     take_to_work,
     take_to_work_bulk,
@@ -172,17 +173,19 @@ def test_refresh_order_statuses_cancels_order(db, seller):
     db.refresh(order)
     assert order.status == OrderStatus.CANCELLED
     assert order.wb_status == "canceled_by_client"
-    assert result == {"checked": 1, "cancelled": 1}
+    assert result == {"checked": 1, "cancelled": 1, "advanced": 0, "shippedOutside": 0}
 
 
 def test_refresh_order_statuses_ignores_completed_orders(db, seller):
-    """SHIPPED — уже финальный статус, опрашивать нечего."""
-    order = Order(client_id=seller.id, wb_order_id="DONE-1", status=OrderStatus.SHIPPED)
+    """DELIVERED — терминальный статус, опрашивать нечего. SHIPPED терминальным
+    НЕ считается: отгруженный заказ должен дойти до «доставлен» (см.
+    test_refresh_order_statuses_shipped_reaches_delivered)."""
+    order = Order(client_id=seller.id, wb_order_id="DONE-1", status=OrderStatus.DELIVERED)
     db.add(order)
     db.commit()
 
     result = refresh_order_statuses(db, seller, WBMockClient(client_id=seller.id))
-    assert result == {"checked": 0, "cancelled": 0}
+    assert result == {"checked": 0, "cancelled": 0, "advanced": 0, "shippedOutside": 0}
 
 
 def test_refresh_order_statuses_sets_delivered(db, seller):
@@ -198,7 +201,7 @@ def test_refresh_order_statuses_sets_delivered(db, seller):
     result = refresh_order_statuses(db, seller, wb)
     db.refresh(order)
     assert order.status == OrderStatus.DELIVERED
-    assert result == {"checked": 1, "cancelled": 0}
+    assert result == {"checked": 1, "cancelled": 0, "advanced": 1, "shippedOutside": 0}
 
 
 def test_refresh_order_statuses_cancel_after_packed_returns_stock(db, seller):
@@ -277,6 +280,196 @@ def test_refresh_order_statuses_cancel_before_packing_releases_pick_lines(db, se
     refresh_order_statuses(db, seller, wb)
 
     assert db.scalars(select(PickLine).where(PickLine.order_id == order.id)).all() == []
+
+
+# --- Статусы WB двигают локальный статус -------------------------------------
+# Дефект «кабинет показывает 9 новых заказов, хотя 3 отгружены и 6 на сборке»:
+# заказы проводили в личном кабинете WB минуя Fulfil, а опрос статусов трактовал
+# только отмену и «выкуплен», поэтому локально они навсегда оставались NEW.
+
+
+def test_refresh_order_statuses_confirm_moves_new_to_confirmed(db, seller):
+    order = Order(client_id=seller.id, wb_order_id="CONFIRM-1", status=OrderStatus.NEW)
+    db.add(order)
+    db.commit()
+
+    wb = WBMockClient(client_id=seller.id)
+    wb.set_order_status("CONFIRM-1", "waiting", "confirm")
+    result = refresh_order_statuses(db, seller, wb)
+
+    db.refresh(order)
+    assert order.status == OrderStatus.CONFIRMED
+    assert order.supplier_status == "confirm"
+    assert order.problem is None  # сборки у нас ещё не было, но и отгрузки тоже
+    assert result["advanced"] == 1
+
+
+def test_refresh_order_statuses_sorted_marks_shipped_outside(db, seller):
+    """Заказ отсортирован и отгружён на стороне WB, сборки у нас не было —
+    остаток трогать нельзя (неизвестно, из какой ячейки ушёл товар), заказ
+    помечается problem='shipped_outside' для ручного разбора."""
+    from fulfil.models.fbs import OrderItem, PickLine
+    from fulfil.models.product import Product
+    from fulfil.models.stock import StockByCell
+    from fulfil.services.picking import build_pick_list
+    from fulfil.services.receiving import place_stock
+    from fulfil.services.storage import generate_cells
+
+    _with_warehouse(seller)
+    product = Product(client_id=seller.id, barcode="2000000000062", name="Товар")
+    db.add(product)
+    db.flush()
+    [cell] = generate_cells(db, "A", racks=1, cells_per_rack=1)
+    place_stock(db, product, cell, 10)
+
+    order = Order(client_id=seller.id, wb_order_id="SORTED-1", status=OrderStatus.CONFIRMED)
+    db.add(order)
+    db.flush()
+    db.add(OrderItem(order_id=order.id, product_id=product.id, barcode=product.barcode, qty=4))
+    db.commit()
+    db.refresh(order)
+    build_pick_list(db, order)  # бронирует, но не списывает
+
+    wb = WBMockClient(client_id=seller.id)
+    wb.set_order_status("SORTED-1", "sorted", "complete")
+    result = refresh_order_statuses(db, seller, wb)
+
+    db.refresh(order)
+    assert order.status == OrderStatus.SHIPPED
+    assert order.problem == "shipped_outside"
+    assert result["shippedOutside"] == 1
+    # Остаток НЕ списан автоматически, но бронь листа подбора снята — иначе она
+    # висела бы вечно и мешала распределению под другие заказы.
+    assert db.scalar(select(StockByCell.qty).where(StockByCell.product_id == product.id)) == 10
+    assert db.scalars(select(PickLine).where(PickLine.order_id == order.id)).all() == []
+
+
+def test_refresh_order_statuses_sorted_after_our_packing_is_clean(db, seller):
+    """Тот же sorted, но заказ собран у нас — остаток уже списан подбором,
+    никакой проблемы нет."""
+    order = Order(client_id=seller.id, wb_order_id="SORTED-2", status=OrderStatus.PACKED)
+    db.add(order)
+    db.commit()
+
+    wb = WBMockClient(client_id=seller.id)
+    wb.set_order_status("SORTED-2", "sorted", "complete")
+    result = refresh_order_statuses(db, seller, wb)
+
+    db.refresh(order)
+    assert order.status == OrderStatus.SHIPPED
+    assert order.problem is None
+    assert result["shippedOutside"] == 0
+
+
+def test_refresh_order_statuses_never_rolls_status_back(db, seller):
+    """У WB один "confirm" на наши CONFIRMED / IN_ASSEMBLY / PACKED — опрос
+    статусов не должен сбрасывать собранный заказ обратно в «подтверждён»."""
+    order = Order(client_id=seller.id, wb_order_id="PACKED-1", status=OrderStatus.PACKED)
+    db.add(order)
+    db.commit()
+
+    wb = WBMockClient(client_id=seller.id)
+    wb.set_order_status("PACKED-1", "waiting", "confirm")
+    result = refresh_order_statuses(db, seller, wb)
+
+    db.refresh(order)
+    assert order.status == OrderStatus.PACKED
+    assert order.supplier_status == "confirm"  # сырой статус WB всё равно пишется
+    assert result["advanced"] == 0
+
+
+def test_refresh_order_statuses_shipped_reaches_delivered(db, seller):
+    """Отгруженный нами заказ должен дойти до «доставлен»: раньше выборка
+    опроса кончалась на IN_SUPPLY и ветка "sold" для SHIPPED была недостижима."""
+    order = Order(client_id=seller.id, wb_order_id="SHIPPED-1", status=OrderStatus.SHIPPED)
+    db.add(order)
+    db.commit()
+
+    wb = WBMockClient(client_id=seller.id)
+    wb.set_order_status("SHIPPED-1", "sold", "complete")
+    refresh_order_statuses(db, seller, wb)
+
+    db.refresh(order)
+    assert order.status == OrderStatus.DELIVERED
+    assert order.problem is None  # sold поверх нашей же отгрузки — не «мимо нас»
+
+
+def test_refresh_order_statuses_unknown_wb_status_changes_nothing(db, seller):
+    """Набор значений WB в проекте best-effort: незнакомое значение не двигает
+    статус и не роняет опрос остальных заказов."""
+    order = Order(client_id=seller.id, wb_order_id="WEIRD-1", status=OrderStatus.NEW)
+    db.add(order)
+    db.commit()
+
+    wb = WBMockClient(client_id=seller.id)
+    wb.set_order_status("WEIRD-1", "something_new_from_wb", "unheard_of")
+    refresh_order_statuses(db, seller, wb)
+
+    db.refresh(order)
+    assert order.status == OrderStatus.NEW
+    assert order.wb_status == "something_new_from_wb"
+
+
+def test_refresh_order_statuses_cancel_beats_any_stage(db, seller):
+    order = Order(client_id=seller.id, wb_order_id="CANCEL-PACKED", status=OrderStatus.PACKED)
+    db.add(order)
+    db.commit()
+
+    wb = WBMockClient(client_id=seller.id)
+    wb.set_order_status("CANCEL-PACKED", "canceled_by_client", "complete")
+    refresh_order_statuses(db, seller, wb)
+
+    db.refresh(order)
+    assert order.status == OrderStatus.CANCELLED
+
+
+def test_counters_after_refresh_reflect_wb_stages(db, seller):
+    """Сквозной кейс заказчика: 9 заказов лежат в NEW, на WB 3 отгружены и
+    6 на сборке — в плитке «Новые» после опроса статусов не должно остаться
+    ничего."""
+    for i in range(9):
+        db.add(Order(client_id=seller.id, wb_order_id=f"MIX-{i}", status=OrderStatus.NEW))
+    db.commit()
+
+    wb = WBMockClient(client_id=seller.id)
+    for i in range(3):
+        wb.set_order_status(f"MIX-{i}", "sorted", "complete")
+    for i in range(3, 9):
+        wb.set_order_status(f"MIX-{i}", "waiting", "confirm")
+    refresh_order_statuses(db, seller, wb)
+
+    counters = get_order_counters(db, client_id=seller.id)
+    assert counters["new"] == 0
+    assert counters["assembly"] == 6
+    assert counters["problems"] == 3  # три отгруженных мимо нас
+
+
+def test_sync_client_orders_reports_created_and_updated(db, seller):
+    """Строка результата для тоста «Обновить из WB»: одна и та же и для синка
+    одного кабинета, и для синка всех. Без `updated` подтянутые статусы никак
+    не проявлялись бы в интерфейсе."""
+    _with_warehouse(seller)
+    old = Order(client_id=seller.id, wb_order_id="OLD-1", status=OrderStatus.NEW)
+    db.add(old)
+    db.commit()
+
+    wb = WBMockClient(client_id=seller.id)
+    wb.set_order_status("OLD-1", "waiting", "confirm")
+    result = sync_client_orders(db, seller, wb)
+
+    db.refresh(old)
+    assert old.status == OrderStatus.CONFIRMED
+    assert result["created"] == 1  # дефолтный заказ мока
+    assert result["updated"] == 1
+    assert result["error"] is None
+
+
+def test_sync_client_orders_returns_error_row_instead_of_raising(db, seller):
+    """Склад не выбран — ошибка уходит в строку результата, а не наружу: синк
+    остальных кабинетов не должен вставать из-за одного."""
+    result = sync_client_orders(db, seller, WBMockClient(client_id=seller.id))
+    assert result["error"]
+    assert result["created"] == 0 and result["updated"] == 0
 
 
 # --- «Взять в работу»: подтверждение через поставку -------------------------

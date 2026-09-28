@@ -162,13 +162,24 @@ class WBMockClient:
         return order
 
     def get_order_statuses(self, order_ids: list[str]) -> dict[str, WbOrderStatus]:
-        default: WbOrderStatus = {"wbStatus": "sorted", "supplierStatus": "confirm"}
+        # Дефолт — состояние только что импортированного заказа: WB держит его
+        # в "waiting"/"new", пока продавец не добавил его в поставку. Раньше здесь
+        # стояло "sorted"/"confirm" (уже отсортирован!) — с тех пор как статусы WB
+        # двигают локальный статус (services/orders._wb_target_status), такой дефолт
+        # мгновенно уводил бы каждый мок-заказ в SHIPPED.
+        default: WbOrderStatus = {"wbStatus": "waiting", "supplierStatus": "new"}
         return {oid: self._order_statuses.get(oid, default) for oid in order_ids}
+
+    def set_order_status(self, order_id: str, wb_status: str, supplier_status: str) -> None:
+        """Тестовый хук — эмулирует работу продавца в личном кабинете WB минуя нас
+        (сборка, сортировка, отгрузка): следующий refresh_order_statuses() увидит
+        эти статусы и подтянет локальный статус заказа."""
+        self._order_statuses[order_id] = {"wbStatus": wb_status, "supplierStatus": supplier_status}
 
     def cancel_order(self, order_id: str) -> None:
         """Тестовый хук — эмулирует отмену покупателем (Этап 3, п.3.1): следующий
         refresh_order_statuses() увидит wbStatus canceled_by_client."""
-        self._order_statuses[order_id] = {"wbStatus": "canceled_by_client", "supplierStatus": "cancel"}
+        self.set_order_status(order_id, "canceled_by_client", "cancel")
 
     def get_order_sticker(self, order_id: str) -> WbSticker:
         return {"type": "png", "data": _PNG_1PX}
