@@ -67,13 +67,13 @@
             const isSelf = u.id === me.id;
             const actions = !manage
               ? ''
-              : `<button class="btn" data-edit="${u.id}">Изменить</button>
-                 <button class="btn" data-password="${u.id}">Сменить пароль</button>
+              : `<button class="btn" data-edit="${Fulfil.esc(u.id)}">Изменить</button>
+                 <button class="btn" data-password="${Fulfil.esc(u.id)}">Сменить пароль</button>
                  ${
                    u.role === 'host' || isSelf
                      ? ''
-                     : `<button class="btn" data-toggle="${u.id}">${u.isActive ? 'Заблокировать' : 'Разблокировать'}</button>
-                        <button class="btn btn-danger" data-archive="${u.id}">Удалить</button>`
+                     : `<button class="btn" data-toggle="${Fulfil.esc(u.id)}">${u.isActive ? 'Заблокировать' : 'Разблокировать'}</button>
+                        <button class="btn btn-danger" data-archive="${Fulfil.esc(u.id)}">Удалить</button>`
                  }`;
             return `
           <div class="card user-card ${u.isActive ? '' : 'inactive-row'}">

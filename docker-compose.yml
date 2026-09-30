@@ -30,6 +30,7 @@ services:
       ADMIN_LOGIN: ${ADMIN_LOGIN:?set ADMIN_LOGIN in App Platform variables}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:?set ADMIN_PASSWORD in App Platform variables}
       JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in App Platform variables}
+      APP_ENV: ${APP_ENV:-production}
       WB_MODE: ${WB_MODE:-mock}
       WB_API_TOKEN: ${WB_API_TOKEN:-}
       WB_API_BASE: ${WB_API_BASE:-https://marketplace-api.wildberries.ru}
@@ -45,22 +46,3 @@ services:
              python -m uvicorn fulfil.main:app --host 0.0.0.0 --port 8000"
     ports:
       - "8000:8000"
-
-  # ВНИМАНИЕ: без `volumes` данные PostgreSQL живут только в слое контейнера
-  # и теряются при каждом пересоздании (редеплой, перезапуск приложения).
-  # Для боевых данных поднимите управляемую БД Timeweb Cloud (Cloud Databases),
-  # удалите этот сервис вместе с блоком depends_on выше и укажите её адрес
-  # в DATABASE_URL.
-  db:
-    image: postgres:16
-    restart: unless-stopped
-    environment:
-      POSTGRES_USER: fulfil
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in App Platform variables}
-      POSTGRES_DB: fulfil
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U fulfil"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-    # Хост-порт не публикуем — доступ только из внутренней сети compose.

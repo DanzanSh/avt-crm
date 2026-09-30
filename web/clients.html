@@ -118,20 +118,20 @@
 
             // Вернуть из архива и удалить может только владелец (problems.txt, п.5) —
             // у сотрудника на архивной карточке кнопок нет вовсе.
-            const hostDelete = isHost ? `<button class="btn btn-danger" data-delete="${c.id}">Удалить</button>` : '';
+            const hostDelete = isHost ? `<button class="btn btn-danger" data-delete="${Fulfil.esc(c.id)}">Удалить</button>` : '';
             let actions;
             if (c.deletedAt) {
-              actions = `<button class="btn btn-restore" data-id="${c.id}">Восстановить</button>
-                 <button class="btn btn-danger" data-purge="${c.id}">Удалить безвозвратно</button>`;
+              actions = `<button class="btn btn-restore" data-id="${Fulfil.esc(c.id)}">Восстановить</button>
+                 <button class="btn btn-danger" data-purge="${Fulfil.esc(c.id)}">Удалить безвозвратно</button>`;
             } else if (c.archivedAt) {
               actions = isHost
-                ? `<button class="btn btn-restore" data-id="${c.id}">Восстановить</button>${hostDelete}`
+                ? `<button class="btn btn-restore" data-id="${Fulfil.esc(c.id)}">Восстановить</button>${hostDelete}`
                 : '<span class="key-missing">Вернуть из архива может только владелец</span>';
             } else {
-              actions = `<button class="btn btn-edit" data-id="${c.id}">Изменить</button>
-                 <button class="btn" data-warehouse="${c.id}">Склад WB</button>
-                 <button class="btn" data-check="${c.id}">Проверить подключение</button>
-                 <button class="btn btn-danger" data-archive="${c.id}">Архивировать</button>
+              actions = `<button class="btn btn-edit" data-id="${Fulfil.esc(c.id)}">Изменить</button>
+                 <button class="btn" data-warehouse="${Fulfil.esc(c.id)}">Склад WB</button>
+                 <button class="btn" data-check="${Fulfil.esc(c.id)}">Проверить подключение</button>
+                 <button class="btn btn-danger" data-archive="${Fulfil.esc(c.id)}">Архивировать</button>
                  ${hostDelete}`;
             }
             const badge = c.deletedAt
@@ -379,7 +379,7 @@
             return;
           }
           select.innerHTML = offices
-            .map((o) => `<option value="${o.id}">${Fulfil.esc(o.name)}${o.address ? ' — ' + Fulfil.esc(o.address) : ''}</option>`)
+            .map((o) => `<option value="${Fulfil.esc(o.id)}">${Fulfil.esc(o.name)}${o.address ? ' — ' + Fulfil.esc(o.address) : ''}</option>`)
             .join('');
           document.getElementById('whCreateSubmit').disabled = false;
         })

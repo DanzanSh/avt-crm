@@ -8,6 +8,7 @@ from fulfil import jobs
 from fulfil.api.v1 import (
     audit, auth, clients, dashboard, fbs, products, receiving, scan, settings_, stock, storage, users,
 )
+from fulfil.config import get_settings
 from fulfil.db import SessionLocal
 from fulfil.errors import AppError, app_error_handler
 from fulfil.services import users as users_service
@@ -31,7 +32,18 @@ async def lifespan(_app: FastAPI):
         jobs.stop()
 
 
-app = FastAPI(title="Fulfil PoC", lifespan=lifespan)
+_settings = get_settings()
+_prod = _settings.app_env == "production"
+
+app = FastAPI(
+    title="Fulfil PoC",
+    lifespan=lifespan,
+    # /docs, /redoc, /openapi.json открыты только в dev — в проде это неавторизованный
+    # обзор всего API (план «безопасность», п.5).
+    docs_url=None if _prod else "/docs",
+    redoc_url=None if _prod else "/redoc",
+    openapi_url=None if _prod else "/openapi.json",
+)
 app.add_exception_handler(AppError, app_error_handler)
 
 
@@ -44,6 +56,32 @@ async def no_stale_static(request: Request, call_next):
     response = await call_next(request)
     if not request.url.path.startswith("/api/"):
         response.headers["Cache-Control"] = "no-cache"
+    return response
+
+
+# CSP допускает инлайн-стили и инлайн-скрипты/onerror= (фронт активно их использует,
+# например web/products.html) — 'unsafe-inline' в style-src/script-src временно
+# оставлен, иначе страницы перестанут работать. Уборка инлайна — отдельная задача.
+# CORS сознательно не добавляем: фронт отдаётся тем же приложением (StaticFiles на
+# "/" ниже), кросс-доменных запросов нет.
+_CSP = (
+    "default-src 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; "
+    "script-src 'self' 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; "
+    "base-uri 'self'; form-action 'self'"
+)
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "same-origin"
+    response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), payment=()"
+    response.headers["Content-Security-Policy"] = _CSP
+    if _prod:
+        # Только в проде — иначе локальный HTTP-доступ ломается после первого захода.
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     return response
 
 app.include_router(auth.router, prefix="/api/v1")

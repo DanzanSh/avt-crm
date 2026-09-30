@@ -1,11 +1,12 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
+from fulfil.auth import get_current_user
 from fulfil.pages import PAGES
 
 router = APIRouter(prefix="/settings", tags=["settings"])
 
 
-@router.get("/pages")
+@router.get("/pages", dependencies=[Depends(get_current_user)])
 def get_pages() -> list[dict]:
     """Реестр страниц — единственный источник правды (fulfil.pages.PAGES).
     Фронт строит сайдбар и ACL из этого ответа, не хранит собственной копии карты."""
@@ -20,4 +21,6 @@ def get_pages() -> list[dict]:
 
 @router.get("/public")
 def get_public_settings() -> dict:
+    """Осознанно без авторизации — по имени и назначению для использования до входа
+    (брендинг страницы логина); данных, требующих защиты, тут нет."""
     return {"companyName": "Fulfil PoC", "brandShort": "Fulfil"}

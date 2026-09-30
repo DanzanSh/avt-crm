@@ -5,6 +5,7 @@ import os
 os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
 os.environ.setdefault("ADMIN_LOGIN", "test-admin")
 os.environ.setdefault("ADMIN_PASSWORD", "test-admin")
+os.environ.setdefault("JWT_SECRET", "test-" + "0" * 32)
 
 import pytest
 from sqlalchemy import create_engine, event
@@ -12,6 +13,20 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from fulfil.db import Base
+
+
+@pytest.fixture(autouse=True)
+def _reset_login_rate_limits():
+    """Лимитеры /auth/login живут в памяти процесса на модуле fulfil.api.v1.auth —
+    без сброса между тестами TestClient (общий host "testclient") накапливал бы
+    попытки через все тесты и test_auth.py начал бы ловить 429."""
+    from fulfil.api.v1 import auth as auth_api
+
+    auth_api._login_limiter._hits.clear()
+    auth_api._ip_limiter._hits.clear()
+    yield
+    auth_api._login_limiter._hits.clear()
+    auth_api._ip_limiter._hits.clear()
 
 
 @pytest.fixture()

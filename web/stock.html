@@ -175,7 +175,7 @@
         body.innerHTML = rows
           .map(
             (r) => `
-          <tr class="row-toggle" data-product-id="${r.productId}">
+          <tr class="row-toggle" data-product-id="${Fulfil.esc(r.productId)}">
             <td><span class="chevron">▶</span></td>
             <td>
               ${Fulfil.esc(r.productName)} <span class="badge badge-muted">${Fulfil.esc(r.clientName || '')}</span>
@@ -186,9 +186,9 @@
             <td class="num">${r.inOrders}</td>
             <td class="num">${r.wbFbsAmount}${r.fbsOversold ? `<div class="oversold">на WB на ${r.fbsOversold} больше остатка</div>` : ''}</td>
             <td class="num">${r.availableToTransfer}</td>
-            <td><button class="btn btn-primary btn-transfer" data-id="${r.productId}" data-available="${r.availableToTransfer}">На ФБС</button></td>
+            <td><button class="btn btn-primary btn-transfer" data-id="${Fulfil.esc(r.productId)}" data-available="${Fulfil.esc(r.availableToTransfer)}">На ФБС</button></td>
           </tr>
-          <tr class="detail-row" data-product-id="${r.productId}" style="display:none">
+          <tr class="detail-row" data-product-id="${Fulfil.esc(r.productId)}" style="display:none">
             <td></td>
             <td colspan="7">${renderByCell(r)}</td>
           </tr>`
@@ -199,7 +199,7 @@
           row.addEventListener('click', (e) => {
             if (e.target.closest('.btn-transfer')) return;
             row.classList.toggle('open');
-            const detail = document.querySelector(`.detail-row[data-product-id="${row.dataset.productId}"]`);
+            const detail = document.querySelector(`.detail-row[data-product-id="${Fulfil.esc(row.dataset.productId)}"]`);
             detail.style.display = row.classList.contains('open') ? '' : 'none';
           });
         });
@@ -236,7 +236,7 @@
       return `<table class="by-cell-table">${r.byCell
         .map(
           (c) => `
-        <tr data-product-id="${r.productId}" data-cell-id="${c.cellId}" data-qty="${c.qty}" data-product-name="${Fulfil.esc(r.productName)}" data-vendor-code="${Fulfil.esc(r.vendorCode || '')}">
+        <tr data-product-id="${Fulfil.esc(r.productId)}" data-cell-id="${Fulfil.esc(c.cellId)}" data-qty="${Fulfil.esc(c.qty)}" data-product-name="${Fulfil.esc(r.productName)}" data-vendor-code="${Fulfil.esc(r.vendorCode || '')}">
           <td style="font-family:var(--mono)">${Fulfil.esc(c.cellAddress)}</td>
           <td class="num">${c.qty} шт</td>
           <td><button class="btn btn-sm btn-adjust">Изменить</button></td>

@@ -5,8 +5,9 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from fulfil.auth import get_current_user
+from fulfil.config import get_settings
 from fulfil.db import get_db
-from fulfil.errors import NotFoundError
+from fulfil.errors import AppError, NotFoundError
 from fulfil.exports.receipt_xlsx import build_discrepancy_report_xlsx
 from fulfil.models.receiving import Receipt
 from fulfil.schemas.receiving import (
@@ -126,10 +127,37 @@ def set_plan(receipt_id: int, body: SetPlanRequest, db: Session = Depends(get_db
     return receiving_service.plan_with_suggestions(db, receipt)
 
 
+_XLSX_CONTENT_TYPES = {
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    # Некоторые браузеры/ОС не знают правильный mime-тип для xlsx и шлют общий.
+    "application/octet-stream",
+    "",
+}
+
+
 @router.post("/{receipt_id}/plan/import", response_model=ImportPlanResultOut)
-async def import_plan(receipt_id: int, file: UploadFile = File(...), db: Session = Depends(get_db)) -> dict:
+def import_plan(receipt_id: int, file: UploadFile = File(...), db: Session = Depends(get_db)) -> dict:
+    """Обычный `def`, не `async def`: разбор xlsx и запись в БД внутри — блокирующий
+    ввод-вывод, FastAPI сам уводит такой хендлер в threadpool. Раньше `async def`
+    исполнял всё это прямо в event loop — один большой файл вешал весь сервер
+    (план «безопасность», п.4)."""
     receipt = _get_receipt(db, receipt_id)
-    content = await file.read()
+
+    filename = (file.filename or "").lower()
+    if not filename.endswith(".xlsx"):
+        raise AppError("Ожидается файл в формате .xlsx.", status_code=422, reason_code="bad_file_type")
+    if file.content_type not in _XLSX_CONTENT_TYPES:
+        raise AppError("Ожидается файл в формате .xlsx.", status_code=422, reason_code="bad_file_type")
+
+    # Заявленному размеру (Content-Length/file.size) не доверяем — читаем сами не
+    # больше limit+1 байт и отбиваем превышение по факту прочитанного.
+    limit = get_settings().max_upload_bytes
+    content = file.file.read(limit + 1)
+    if len(content) > limit:
+        raise AppError(
+            f"Файл больше {limit // (1024 * 1024)} МБ.", status_code=413, reason_code="file_too_large",
+        )
+
     return receiving_service.import_plan_xlsx(db, receipt, content)
 
 

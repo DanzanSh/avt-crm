@@ -18,7 +18,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 from fulfil.errors import AppError, CellOccupiedError, NotFoundError
-from fulfil.exports.receipt_xlsx import build_template_xlsx, parse_plan_rows
+from fulfil.exports.receipt_xlsx import PlanFileError, build_template_xlsx, parse_plan_rows
 from fulfil.models import audit
 from fulfil.models.client import Client, deleted_client_ids
 from fulfil.models.product import Product
@@ -334,7 +334,10 @@ def import_plan_xlsx(db: Session, receipt: Receipt, file_bytes: bytes) -> dict:
     строка ошибочна (баркод не найден, количество не число) — план не трогаем,
     отдаём отчёт "строка N — причина"."""
     _require_draft(receipt)
-    raw_rows = parse_plan_rows(file_bytes)
+    try:
+        raw_rows = parse_plan_rows(file_bytes)
+    except PlanFileError as e:
+        raise AppError(str(e), status_code=422, reason_code="bad_plan_file") from e
     parsed: list[tuple[str, str, int]] = []  # (label, barcode, qty)
     errors: list[str] = []
     for row in raw_rows:

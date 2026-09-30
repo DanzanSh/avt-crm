@@ -203,6 +203,83 @@ def test_import_plan_xlsx_requires_draft(db, seller):
         import_plan_xlsx(db, receipt, file_bytes)
 
 
+def test_import_plan_xlsx_garbage_bytes_gives_422_not_500(db, seller):
+    receipt = create_receipt(db, seller, expected_date=None, comment=None, actor="op")
+    with pytest.raises(AppError) as exc_info:
+        import_plan_xlsx(db, receipt, b"this is not an xlsx file at all")
+    assert exc_info.value.status_code == 422
+    assert exc_info.value.reason_code == "bad_plan_file"
+
+
+# --- HTTP: лимит размера и тип файла на /plan/import (план «безопасность», п.4) ---
+
+
+def test_import_plan_http_rejects_oversized_file(api, db, seller):
+    from conftest import make_user, auth_headers
+    from fulfil.config import get_settings
+
+    user = make_user(db, "ivan")
+    receipt = create_receipt(db, seller, expected_date=None, comment=None, actor="op")
+
+    limit = get_settings().max_upload_bytes
+    oversized = b"x" * (limit + 1)
+    resp = api.post(
+        f"/api/v1/receiving/{receipt.id}/plan/import",
+        files={"file": ("plan.xlsx", oversized, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        headers=auth_headers(user),
+    )
+    assert resp.status_code == 413
+    assert resp.json()["reasonCode"] == "file_too_large"
+
+
+def test_import_plan_http_rejects_wrong_extension(api, db, seller):
+    from conftest import make_user, auth_headers
+
+    user = make_user(db, "ivan")
+    receipt = create_receipt(db, seller, expected_date=None, comment=None, actor="op")
+
+    resp = api.post(
+        f"/api/v1/receiving/{receipt.id}/plan/import",
+        files={"file": ("plan.txt", b"not xlsx", "text/plain")},
+        headers=auth_headers(user),
+    )
+    assert resp.status_code == 422
+    assert resp.json()["reasonCode"] == "bad_file_type"
+
+
+def test_import_plan_http_rejects_garbage_xlsx(api, db, seller):
+    from conftest import make_user, auth_headers
+
+    user = make_user(db, "ivan")
+    receipt = create_receipt(db, seller, expected_date=None, comment=None, actor="op")
+
+    resp = api.post(
+        f"/api/v1/receiving/{receipt.id}/plan/import",
+        files={"file": ("plan.xlsx", b"garbage-not-a-real-xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        headers=auth_headers(user),
+    )
+    assert resp.status_code == 422
+    assert resp.json()["reasonCode"] == "bad_plan_file"
+
+
+def test_import_plan_http_accepts_valid_file_within_limit(api, db, seller):
+    from conftest import make_user, auth_headers
+
+    user = make_user(db, "ivan")
+    _make_product(db, seller, barcode="1111111111111", name="Товар A")
+    receipt = create_receipt(db, seller, expected_date=None, comment=None, actor="op")
+    file_bytes = _xlsx_bytes([["1111111111111", "", "Товар A", "", "", 3]])
+
+    resp = api.post(
+        f"/api/v1/receiving/{receipt.id}/plan/import",
+        files={"file": ("plan.xlsx", file_bytes, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        headers=auth_headers(user),
+    )
+    assert resp.status_code == 200
+    assert resp.json()["ok"] is True
+    assert resp.json()["imported"] == 1
+
+
 # --- Проведение приёмки ---
 
 

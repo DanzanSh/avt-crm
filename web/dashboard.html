@@ -71,13 +71,19 @@
       fbs_oversold: 'medium',
     };
 
+    /** Ссылки дашборда все внутренние — пускаем только то, что начинается с "/",
+     * иначе (в т.ч. javascript:) подставляем "#". Значения приходят из ответа API. */
+    function safeLink(link) {
+      return typeof link === 'string' && link.startsWith('/') ? Fulfil.esc(link) : '#';
+    }
+
     function kpi(label, value, link) {
       const inner = `
         <div class="card stat-card">
           <span class="stat-card__label">${Fulfil.esc(label)}</span>
           <span class="stat-card__value">${value}</span>
         </div>`;
-      return link ? `<a class="kpi-link" href="${link}">${inner}</a>` : inner;
+      return link ? `<a class="kpi-link" href="${safeLink(link)}">${inner}</a>` : inner;
     }
 
     function renderKpis(s) {
@@ -153,7 +159,7 @@
         .map((it) => {
           const sev = SEVERITY[it.type] || 'medium';
           return `
-        <a class="attention-item severity-${sev}" href="${it.link}">
+        <a class="attention-item severity-${sev}" href="${safeLink(it.link)}">
           <span>${Fulfil.esc(it.message)}</span>
           <span class="go">Перейти →</span>
         </a>`;

@@ -1,7 +1,7 @@
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -17,8 +17,35 @@ class Settings(BaseSettings):
     admin_login: str = Field(min_length=1)
     admin_password: str = Field(min_length=1)
 
-    jwt_secret: str = "change-me-in-production"
+    # Обязателен, без дефолта: приложение со «change-me-in-production» подписывало бы
+    # токены хоста публично известным ключом. openssl rand -hex 32 для генерации.
+    jwt_secret: str = Field(min_length=32)
     jwt_expire_minutes: int = 60
+
+    @field_validator("jwt_secret")
+    @classmethod
+    def _jwt_secret_not_trivial(cls, v: str) -> str:
+        if v.lower().startswith("change-me") or len(set(v)) <= 1:
+            raise ValueError(
+                "JWT_SECRET похож на заглушку по умолчанию или состоит из одного "
+                "повторяющегося символа. Сгенерируйте настоящий секрет: "
+                "openssl rand -hex 32"
+            )
+        return v
+
+    # development — локальный запуск и тесты (docs/redoc открыты, HSTS не ставится);
+    # production — /docs, /redoc, /openapi.json отключены, добавляется HSTS.
+    app_env: Literal["development", "production"] = "development"
+
+    # Лимит на загрузку файлов (receiving/plan/import) — байт. Читается в два приёма:
+    # заявленный размер и фактический (заголовку Content-Length не доверяем).
+    max_upload_bytes: int = 5 * 1024 * 1024
+
+    # Rate limit на /auth/login (в памяти процесса — деплой одна реплика, см.
+    # fulfil.ratelimit). При масштабировании на несколько реплик нужен общий бэкенд
+    # (Redis), сейчас не заводим намеренно.
+    login_rate_limit: int = 10
+    login_rate_window_sec: int = 300
 
     wb_mode: Literal["http", "mock"] = "mock"
     # Устарело — с Этапа 1 у каждого клиента свой ключ (clients.wb_api_key_enc) и свой

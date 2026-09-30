@@ -8,12 +8,22 @@
 """
 
 import io
+import zipfile
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.utils import get_column_letter
+from openpyxl.utils.exceptions import InvalidFileException
 
 TEMPLATE_HEADERS = ["Баркод", "Артикул", "Наименование", "Размер", "Цвет", "Ожидается"]
 REPORT_HEADERS = ["Баркод", "Наименование", "Размер", "Цвет", "Заявлено", "Принято", "Расхождение", "Статус"]
+
+# Верхняя граница числа строк плана — защита от zip-bomb / OOM на разборе огромного
+# листа (план «безопасность», п.4). Реальные планы приёмки на порядки меньше.
+MAX_PLAN_ROWS = 10_000
+
+
+class PlanFileError(Exception):
+    """Файл нечитаем как xlsx, либо строк в нём больше MAX_PLAN_ROWS."""
 
 
 def _autosize(ws, headers: list[str]) -> None:
@@ -39,23 +49,34 @@ def build_template_xlsx(products: list[dict]) -> bytes:
 
 def parse_plan_rows(file_bytes: bytes) -> list[dict]:
     """Сырые строки листа, кроме заголовка: [{rowNum, barcode, qtyRaw}].
-    Полностью пустые строки пропускаются молча — это не ошибка формата."""
-    wb = load_workbook(io.BytesIO(file_bytes), data_only=True)
-    ws = wb.active
-    rows = []
-    for idx, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
-        if row is None or all(c is None or str(c).strip() == "" for c in row):
-            continue
-        barcode = row[0] if len(row) > 0 else None
-        qty_raw = row[5] if len(row) > 5 else None
-        rows.append(
-            {
-                "rowNum": idx,
-                "barcode": str(barcode).strip() if barcode is not None else "",
-                "qtyRaw": qty_raw,
-            }
-        )
-    return rows
+    Полностью пустые строки пропускаются молча — это не ошибка формата.
+
+    read_only=True не грузит весь лист в память разом (защита от zip-bomb);
+    книгу обязательно закрываем — иначе временные файлы read_only-режима утекают."""
+    try:
+        wb = load_workbook(io.BytesIO(file_bytes), data_only=True, read_only=True)
+    except (InvalidFileException, KeyError, zipfile.BadZipFile) as e:
+        raise PlanFileError("Не удалось прочитать файл — это не корректный xlsx.") from e
+    try:
+        ws = wb.active
+        rows = []
+        for idx, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
+            if idx - 1 > MAX_PLAN_ROWS:
+                raise PlanFileError(f"В файле больше {MAX_PLAN_ROWS} строк — это не похоже на план приёмки.")
+            if row is None or all(c is None or str(c).strip() == "" for c in row):
+                continue
+            barcode = row[0] if len(row) > 0 else None
+            qty_raw = row[5] if len(row) > 5 else None
+            rows.append(
+                {
+                    "rowNum": idx,
+                    "barcode": str(barcode).strip() if barcode is not None else "",
+                    "qtyRaw": qty_raw,
+                }
+            )
+        return rows
+    finally:
+        wb.close()
 
 
 def build_discrepancy_report_xlsx(rows: list[dict]) -> bytes:

@@ -65,10 +65,9 @@
     return data;
   }
 
+  const _ESC = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
   function esc(s) {
-    const d = document.createElement('div');
-    d.textContent = s === undefined || s === null ? '' : String(s);
-    return d.innerHTML;
+    return s === undefined || s === null ? '' : String(s).replace(/[&<>"']/g, (c) => _ESC[c]);
   }
 
   function toast(message, type) {
