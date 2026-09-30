@@ -392,10 +392,11 @@
         const option = select.options[select.selectedIndex];
         if (!option || !option.value) return;
         try {
-          await Fulfil.api('POST', `/clients/${client.id}/wb-warehouses/select`, {
+          const done = await postWarehouseChange(`/clients/${client.id}/wb-warehouses/select`, {
             warehouseId: option.value,
             warehouseName: option.dataset.name || option.value,
           });
+          if (!done) return;
           Fulfil.toast('Склад привязан');
           closeWarehouseModal();
           load();
@@ -412,7 +413,8 @@
           return;
         }
         try {
-          await Fulfil.api('POST', `/clients/${client.id}/wb-warehouses`, { name, officeId: Number(officeId) });
+          const done = await postWarehouseChange(`/clients/${client.id}/wb-warehouses`, { name, officeId: Number(officeId) });
+          if (!done) return;
           Fulfil.toast('Склад создан и привязан');
           closeWarehouseModal();
           load();
@@ -420,6 +422,26 @@
           Fulfil.toast(Fulfil.errorText(err), 'error');
         }
       });
+    }
+
+    /** Смена склада при активных заказах на других складах — не запрет, а
+     * подтверждение: сервер отвечает 409 client_has_active_orders, после «Да»
+     * повторяем с force. false — пользователь передумал. */
+    async function postWarehouseChange(url, body) {
+      try {
+        await Fulfil.api('POST', url, body);
+        return true;
+      } catch (err) {
+        if (err.reasonCode !== 'client_has_active_orders') throw err;
+        const ok = await Fulfil.confirmModal({
+          title: 'Сменить склад?',
+          message: err.detail,
+          confirmLabel: 'Сменить склад',
+        });
+        if (!ok) return false;
+        await Fulfil.api('POST', url, { ...body, force: true });
+        return true;
+      }
     }
 
     document.getElementById('btnNew').addEventListener('click', () => openEditModal(null));

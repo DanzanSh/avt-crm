@@ -74,6 +74,8 @@ def get_cell_detail(cell_id: int, db: Session = Depends(get_db)) -> dict:
     return {
         **CellOut.model_validate(cell).model_dump(by_alias=True),
         "allowedBarcodes": [a.barcode for a in cell.allowed_barcodes],
+        # Те же баркоды, расшифрованные в товары (название, размер, цвет, клиент).
+        "allowedBarcodeDetails": storage_service.describe_allowed_barcodes(db, cell),
         "contents": storage_service.get_cell_contents(db, cell),
         "lastReceipts": receiving_service.list_receipt_lines(db, limit=5, cell_id=cell_id),
     }

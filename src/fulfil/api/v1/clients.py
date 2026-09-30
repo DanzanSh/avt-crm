@@ -93,7 +93,7 @@ def update_client(
     client = _get_client(db, client_id, user)
     client = clients_service.update_client(
         db, client, name=body.name, api_key=body.api_key, wb_warehouse_id=body.wb_warehouse_id,
-        wb_warehouse_name=body.wb_warehouse_name, actor=_actor(user),
+        wb_warehouse_name=body.wb_warehouse_name, actor=_actor(user), force=body.force,
     )
     return _client_out(client)
 
@@ -165,7 +165,7 @@ def select_wb_warehouse(
 ) -> ClientOut:
     client = clients_service.get_live_client_or_404(db, client_id)
     client = clients_service.set_wb_warehouse(
-        db, client, warehouse_id=body.warehouse_id, warehouse_name=body.warehouse_name, actor=_actor(user),
+        db, client, warehouse_id=body.warehouse_id, warehouse_name=body.warehouse_name, actor=_actor(user), force=body.force,
     )
     return _client_out(client)
 
@@ -177,6 +177,6 @@ def create_wb_warehouse(
     client = clients_service.get_live_client_or_404(db, client_id)
     wb_client = get_wb_client(client)
     client = clients_service.create_wb_warehouse(
-        db, client, wb_client, name=body.name, office_id=body.office_id, actor=_actor(user),
+        db, client, wb_client, name=body.name, office_id=body.office_id, actor=_actor(user), force=body.force,
     )
     return _client_out(client)

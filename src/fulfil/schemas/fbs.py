@@ -14,6 +14,8 @@ class OrderItemOut(CamelModel):
     status: str
     product_name: str | None = None
     product_size: str | None = None
+    product_color: str | None = None
+    product_vendor_code: str | None = None
     product_image_url: str | None = None
 
 

@@ -401,22 +401,49 @@
     async function transferAllAvailable() {
       const clientId = Fulfil.clientFilter.clientId;
       if (!clientId) return;
-      if (!confirm('Передать на ФБС весь свободный остаток по выбранному клиенту?')) return;
+      // Не нативный confirm(): его браузер молча глушит после «Запретить диалоги»,
+      // и кнопка «ничего не делала».
+      const ok = await Fulfil.confirmModal({
+        title: 'Передать всё свободное на ФБС?',
+        message: `Весь свободный остаток клиента «${Fulfil.clientFilter.clientName(clientId)}» будет передан на склад WB.`,
+        confirmLabel: 'Передать',
+      });
+      if (!ok) return;
+      const btn = document.getElementById('btnTransferAll');
+      const label = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = 'Передаём…';
       try {
         const results = await Fulfil.api('POST', `/stock/transfer-fbs-all?client_id=${clientId}`);
         if (!results.length) {
-          Fulfil.toast('Передавать нечего — свободного остатка нет');
+          await Fulfil.confirmModal({
+            title: 'Передавать нечего',
+            message: 'Свободного остатка нет — всё уже передано на ФБС или зарезервировано под заказы.',
+            cancelLabel: null,
+          });
         } else {
           const sent = results.filter((r) => r.status === 'sent').length;
-          const failed = results.length - sent;
-          Fulfil.toast(
-            failed ? `Передано ${sent} из ${results.length}, ${failed} с ошибкой` : `Передано ${sent} товаров на ФБС`,
-            failed ? 'warning' : 'success'
-          );
+          const rows = results
+            .map(
+              (r) => `<tr>
+                <td>${Fulfil.esc(r.productName)}</td>
+                <td class="num">${r.qty}</td>
+                <td>${r.status === 'sent' ? '✓ передано' : `<span style="color:var(--red)">${Fulfil.esc(r.error || 'ошибка')}</span>`}</td>
+              </tr>`
+            )
+            .join('');
+          await Fulfil.confirmModal({
+            title: `Передано ${sent} из ${results.length}`,
+            html: `<div style="max-height:50vh; overflow:auto;"><table class="no-mobile-cards"><thead><tr><th>Товар</th><th class="num">Шт</th><th>Результат</th></tr></thead><tbody>${rows}</tbody></table></div>`,
+            cancelLabel: null,
+          });
         }
         loadStock();
       } catch (err) {
         Fulfil.toast(Fulfil.errorText(err), 'error');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = label;
       }
     }
 

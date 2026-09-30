@@ -19,6 +19,7 @@ import base64
 import datetime as dt
 import uuid
 
+from fulfil.errors import WbApiError
 from fulfil.integrations.wb.base import (
     WbCardsPage,
     WbCursor,
@@ -204,9 +205,18 @@ class WBMockClient:
         self._supplies[supply_id] = supply
         return supply_id
 
-    def add_order_to_supply(self, supply_id: str, order_id: str) -> dict:
+    def add_orders_to_supply(self, supply_id: str, order_ids: list[str]) -> dict:
         self._supplies.setdefault(supply_id, self._blank_supply())
-        self._supplies[supply_id]["orders"].append(order_id)
+        self._supplies[supply_id]["orders"].extend(order_ids)
+        return {"ok": True}
+
+    def delete_supply(self, supply_id: str) -> dict:
+        supply = self._supplies.get(supply_id)
+        if supply is None:
+            raise WbApiError(f"Поставка {supply_id} не найдена в WB.")
+        if supply["done"] or supply["orders"]:
+            raise WbApiError("WB удаляет только открытую поставку без заказов.")
+        del self._supplies[supply_id]
         return {"ok": True}
 
     def close_supply(self, supply_id: str) -> dict:

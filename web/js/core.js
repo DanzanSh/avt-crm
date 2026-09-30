@@ -302,6 +302,49 @@
     });
   }
 
+  /** Модалка подтверждения взамен нативного confirm(): тот браузер глушит молча,
+   * если однажды отметить «Запретить странице создавать диалоги» — кнопка тогда
+   * «ничего не делает». Promise<boolean>. html — доверенная разметка (экранируйте сами);
+   * cancelLabel: null — только одна кнопка (информационное окно). */
+  function confirmModal({ title, message, html, confirmLabel, cancelLabel, danger }) {
+    return new Promise((resolve) => {
+      const overlay = document.createElement('div');
+      overlay.className = 'modal-overlay open';
+      const box = document.createElement('div');
+      box.className = 'modal';
+      const cancelBtn =
+        cancelLabel === null ? '' : `<button type="button" class="btn" data-action="cancel">${esc(cancelLabel || 'Отмена')}</button>`;
+      box.innerHTML = `
+        <h2>${esc(title || 'Подтверждение')}</h2>
+        ${message ? `<p style="margin:0 0 12px; white-space:pre-line;">${esc(message)}</p>` : ''}
+        ${html || ''}
+        <div class="field-row" style="margin-top:8px;">
+          ${cancelBtn}
+          <button type="button" class="btn ${danger ? 'btn-danger' : 'btn-primary'}" data-action="ok">${esc(confirmLabel || 'OK')}</button>
+        </div>`;
+      overlay.appendChild(box);
+      document.body.appendChild(overlay);
+
+      function cleanup(result) {
+        document.removeEventListener('keydown', onKeydown);
+        overlay.remove();
+        resolve(result);
+      }
+      function onKeydown(e) {
+        if (e.key === 'Escape') cleanup(false);
+      }
+      document.addEventListener('keydown', onKeydown);
+      overlay.addEventListener('click', (e) => {
+        if (e.target === overlay) cleanup(false);
+      });
+      const cancel = box.querySelector('[data-action="cancel"]');
+      if (cancel) cancel.addEventListener('click', () => cleanup(false));
+      const ok = box.querySelector('[data-action="ok"]');
+      ok.addEventListener('click', () => cleanup(true));
+      ok.focus();
+    });
+  }
+
   /** Общий фильтр «Клиент» (Этап 1, п.1.5) — рендерит <select> «Все клиенты / <клиенты>»
    * в переданный контейнер, грузит GET /clients, хранит выбор в localStorage (в try/catch —
    * приватный режим браузера может его не давать) и вызывает onChange(clientId|null) при
@@ -359,6 +402,6 @@
 
   window.Fulfil = {
     api, getToken, setToken, logout, decodeJwt, esc, toast, errorText, requireAuth, newIdempotencyKey, thumb,
-    plural, formModal, clientFilter, me, ROLE_LABELS,
+    plural, formModal, confirmModal, clientFilter, me, ROLE_LABELS,
   };
 })();

@@ -52,12 +52,16 @@
     .page-size-group select.input { width: auto; }
     .pagination-controls { display: flex; align-items: center; gap: 10px; }
     .pagination-controls .page-info { font-size: 16px; color: var(--text-2); white-space: nowrap; }
+    .select-all { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; user-select: none; }
   </style>
 </head>
 <body>
   <div class="page-head">
     <h1 class="page-title">Заказы ФБС</h1>
     <div class="toolbar">
+      <label class="select-all" id="selectAllWrap" hidden>
+        <input type="checkbox" id="chkSelectAll" /> <span id="selectAllLabel">Выбрать все</span>
+      </label>
       <button class="btn" id="btnTakeBulk" disabled>Взять в работу выбранные</button>
       <button class="btn btn-primary" id="btnSync">Обновить из WB</button>
     </div>
@@ -158,7 +162,26 @@
       load();
     }
 
+    // Заказы, которые можно выбрать: все такие во вкладке по текущему фильтру
+    // клиента (allOrders — весь список вкладки, не только видимая страница).
+    function selectableOrders() {
+      return allOrders.filter((o) => o.status === 'new' && !o.problem);
+    }
+
+    function updateSelectAll() {
+      const selectable = selectableOrders();
+      const wrap = document.getElementById('selectAllWrap');
+      const chk = document.getElementById('chkSelectAll');
+      wrap.hidden = !selectable.length;
+      const n = selectable.filter((o) => selected.has(o.id)).length;
+      chk.checked = n > 0 && n === selectable.length;
+      chk.indeterminate = n > 0 && n < selectable.length;
+      document.getElementById('selectAllLabel').textContent =
+        n ? `Выбрано ${n} из ${selectable.length}` : `Выбрать все (${selectable.length})`;
+    }
+
     function updateBulkButton() {
+      updateSelectAll();
       const btn = document.getElementById('btnTakeBulk');
       btn.disabled = selected.size === 0;
       btn.textContent = selected.size
@@ -289,6 +312,16 @@
       document.getElementById('btnNextPage').disabled = currentPage >= totalPages;
     }
 
+    document.getElementById('chkSelectAll').addEventListener('change', (e) => {
+      const selectable = selectableOrders();
+      if (e.target.checked) selectable.forEach((o) => selected.add(o.id));
+      else selected.clear();
+      document.querySelectorAll('.chk-order').forEach((chk) => {
+        chk.checked = selected.has(Number(chk.dataset.id));
+      });
+      updateBulkButton();
+    });
+
     document.getElementById('pageSize').addEventListener('change', (e) => {
       pageSize = Number(e.target.value);
       currentPage = 1;
@@ -310,10 +343,13 @@
 
     async function takeToWork(orderId) {
       // «Взять в работу» необратимо на стороне WB — обязательное предупреждение перед вызовом.
-      const ok = confirm(
-        'Заказ будет подтверждён на Wildberries (добавлен в поставку). Покупатель больше не сможет ' +
-          'его отменить, и обратной операции у WB нет. Продолжить?'
-      );
+      const ok = await Fulfil.confirmModal({
+        title: 'Взять заказ в работу?',
+        message:
+          'Заказ будет подтверждён на Wildberries (добавлен в поставку). Покупатель больше не сможет ' +
+          'его отменить, и обратной операции у WB нет.',
+        confirmLabel: 'Взять в работу',
+      });
       if (!ok) return;
       try {
         await Fulfil.api('POST', `/fbs/orders/${orderId}/take-to-work`);
@@ -327,9 +363,11 @@
 
     document.getElementById('btnTakeBulk').addEventListener('click', async () => {
       if (!selected.size) return;
-      const ok = confirm(
-        `${selected.size} заказ(ов) будут подтверждены на Wildberries. Обратной операции у WB нет. Продолжить?`
-      );
+      const ok = await Fulfil.confirmModal({
+        title: 'Взять выбранные в работу?',
+        message: `${selected.size} заказ(ов) будут подтверждены на Wildberries (добавлены в поставку). Обратной операции у WB нет.`,
+        confirmLabel: 'Взять в работу',
+      });
       if (!ok) return;
       try {
         const results = await Fulfil.api('POST', '/fbs/orders/take-to-work-bulk', {
@@ -337,8 +375,19 @@
         });
         const ok_ = results.filter((r) => r.ok).length;
         const failed = results.filter((r) => !r.ok);
-        Fulfil.toast(`Взято в работу: ${ok_}${failed.length ? `, ошибок: ${failed.length}` : ''}`, failed.length ? 'error' : 'success');
-        failed.forEach((r) => Fulfil.toast(`Заказ #${r.orderId}: ${r.error}`, 'error'));
+        if (!failed.length) {
+          Fulfil.toast(`Взято в работу: ${ok_}`);
+        } else {
+          const wbIds = new Map(allOrders.map((o) => [o.id, o.wbOrderId]));
+          const rows = failed
+            .map((r) => `<li><b>${Fulfil.esc(wbIds.get(r.orderId) || '#' + r.orderId)}</b>: ${Fulfil.esc(r.error)}</li>`)
+            .join('');
+          await Fulfil.confirmModal({
+            title: `Взято в работу: ${ok_}, ошибок: ${failed.length}`,
+            html: `<ul style="max-height:50vh; overflow:auto; margin:0 0 12px; padding-left:18px;">${rows}</ul>`,
+            cancelLabel: null,
+          });
+        }
         selected.clear();
         load();
       } catch (err) {

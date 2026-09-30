@@ -374,3 +374,28 @@ def test_remove_allowed_barcode_of_product_in_cell(db, seller):
     remove_allowed_barcode(db, cell, "1111111111111", actor="t")  # последний — можно всегда
     assert cell.allowed_barcodes == []
     remove_allowed_barcode(db, cell, "1111111111111", actor="t")  # уже нет — без ошибки
+
+
+def test_cell_detail_shows_product_specs_and_allowed_products(db, seller):
+    """Карточка места: рядом с названием — артикул, размер, цвет, клиент; допуск
+    расшифрован в товары, в том числе одинаковый ШК у разных клиентов."""
+    from conftest import make_client
+    from fulfil.services.storage import add_allowed_barcode, describe_allowed_barcodes, get_cell_contents
+
+    product = _make_product(db, seller, barcode="1111111111111", name="Футболка")
+    product.vendor_code, product.size, product.color = "ART-1", "M", "чёрный"
+    other_client = make_client(db, name="Другой клиент")
+    _make_product(db, other_client, barcode="1111111111111", name="Футболка")
+    db.commit()
+    [cell] = generate_cells(db, "A", racks=1, cells_per_rack=1)
+    place_stock(db, product, cell, 2)
+    add_allowed_barcode(db, cell, "1111111111111", actor="t")
+
+    [row] = get_cell_contents(db, cell)
+    assert (row["vendorCode"], row["size"], row["color"], row["clientName"], row["qty"]) == (
+        "ART-1", "M", "чёрный", "Тестовый клиент", 2,
+    )
+
+    [allowed] = describe_allowed_barcodes(db, cell)
+    assert allowed["barcode"] == "1111111111111"
+    assert sorted(p["clientName"] for p in allowed["products"]) == ["Другой клиент", "Тестовый клиент"]

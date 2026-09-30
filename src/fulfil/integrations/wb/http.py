@@ -30,6 +30,7 @@ from fulfil.models.wb_log import WbApiLog
 _MAX_RETRIES = 3
 _BACKOFF_BASE_SEC = 0.5
 _ORDER_STATUS_BATCH = 1000  # лимит WB на orders/status за один вызов (best-effort)
+_SUPPLY_ORDERS_BATCH = 100  # лимит WB на PATCH marketplace/v3/supplies/{id}/orders
 
 
 def _wb_hints(client_name: str | None) -> dict:
@@ -356,9 +357,23 @@ class WBHttpClient:
         resp = self._request("POST", "/api/v3/supplies", json={"name": name or "Поставка Fulfil"})
         return str(resp.json().get("id"))
 
-    def add_order_to_supply(self, supply_id: str, order_id: str) -> dict:
-        resp = self._request("PATCH", f"/api/v3/supplies/{supply_id}/orders/{order_id}")
-        return {"ok": resp.status_code < 300}
+    def add_orders_to_supply(self, supply_id: str, order_ids: list[str]) -> dict:
+        try:
+            numeric_ids = [int(order_id) for order_id in order_ids]
+        except (TypeError, ValueError):
+            raise WbApiError(
+                f"Среди заказов {order_ids} есть не настоящий заказ WB — добавить в поставку нельзя."
+            )
+        for start in range(0, len(numeric_ids), _SUPPLY_ORDERS_BATCH):
+            chunk = numeric_ids[start : start + _SUPPLY_ORDERS_BATCH]
+            self._request(
+                "PATCH", f"/api/marketplace/v3/supplies/{supply_id}/orders", json={"orders": chunk}
+            )
+        return {"ok": True}
+
+    def delete_supply(self, supply_id: str) -> dict:
+        self._request("DELETE", f"/api/v3/supplies/{supply_id}")
+        return {"ok": True}
 
     def close_supply(self, supply_id: str) -> dict:
         resp = self._request("PATCH", f"/api/v3/supplies/{supply_id}/deliver")
@@ -386,9 +401,14 @@ class WBHttpClient:
         return {"supplies": supplies, "next": data.get("next") or None}
 
     def get_supply_orders(self, supply_id: str) -> list[str]:
-        resp = self._request("GET", f"/api/v3/supplies/{supply_id}/orders")
+        # Старый GET /api/v3/supplies/{id}/orders отвечает 404 на всех поставках
+        # (docs/wb-api-contract.md) — WB перенёс состав поставки сюда.
+        resp = self._request("GET", f"/api/marketplace/v3/supplies/{supply_id}/order-ids")
         data = resp.json()
-        return [str(o.get("id")) for o in data.get("orders", [])]
+        ids = data.get("orderIds")
+        if ids is None:
+            ids = [o.get("id") if isinstance(o, dict) else o for o in data.get("orders", [])]
+        return [str(i) for i in ids]
 
     def get_supply_qr(self, supply_id: str) -> WbSticker:
         resp = self._request(

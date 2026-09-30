@@ -53,13 +53,22 @@
       display: flex; justify-content: space-between; align-items: center; gap: 12px;
       padding: 10px; font-size: 16px; color: var(--text-2); background: var(--card); border-radius: var(--radius-sm);
     }
-    .qty-row { display: flex; gap: 8px; align-items: center; }
-    .qty-row input { text-align: center; font-size: 23px; }
     .log-item {
       display: flex; justify-content: space-between; gap: 16px; padding: 9px 0;
       border-bottom: 1px solid var(--divider); font-size: 16px; color: var(--text-2);
     }
     .log-item:last-child { border-bottom: none; }
+    .box-card { background: var(--card); border-radius: var(--radius-sm); padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+    .box-head { display: flex; justify-content: space-between; align-items: flex-end; gap: 12px; }
+    .box-label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+    .box-address { font-family: var(--mono); font-size: 26px; font-weight: 700; }
+    .box-total { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; }
+    .box-items { display: flex; flex-direction: column; }
+    .box-item { display: flex; justify-content: space-between; gap: 12px; padding: 6px 0; border-bottom: 1px solid var(--divider); font-size: 15px; }
+    .box-item:last-child { border-bottom: none; }
+    .box-item__specs { font-size: 12px; color: var(--muted); }
+    .box-item__qty { font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; }
+    .box-actions { display: flex; gap: 8px; flex-wrap: wrap; }
     .scanner-note { font-size: 14px; color: rgba(24, 34, 51, 0.7); line-height: 1.2; }
     [data-theme="dark"] .scanner-note { color: rgba(229, 231, 235, 0.75); }
     .plan-toolbar { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 14px; }
@@ -624,19 +633,10 @@
       function renderScannerPanel() {
         return `
           <div class="card scan-panel">
-            <div class="step-hint" id="stepHint">Сейчас нужно: отсканировать баркод товара</div>
+            <div class="step-hint" id="stepHint"></div>
             <input class="input scan-input" id="scanInput" data-scan autofocus placeholder="Скан или ручной ввод + Enter…" autocomplete="off" />
             <div class="scanner-note">Сканер работает независимо от фокуса на поле — можно сканировать, даже кликнув в другое место.</div>
-            <div id="productPreview" style="display:none" class="product-preview">
-              <span id="productName"></span>
-              <span id="productBarcode" style="color:var(--muted); font-family:var(--mono)"></span>
-            </div>
-            <div id="qtyRow" class="qty-row" style="display:none">
-              <button class="btn" type="button" id="qtyMinus">−</button>
-              <input class="input" id="qtyInput" type="number" min="1" value="1" />
-              <button class="btn" type="button" id="qtyPlus">+</button>
-              <button class="btn btn-primary" type="button" id="qtyConfirm">Далее — скан ячейки</button>
-            </div>
+            <div id="boxPanel"></div>
           </div>
           <div class="card" style="padding:18px; margin-bottom:18px">
             <h2 style="font-size:18px; font-weight:700; margin:0 0 12px">Последние операции</h2>
@@ -644,26 +644,86 @@
           </div>`;
       }
 
-      // Состояние скан-флоу живёт ВНЕ bindScannerPanel: панель (и все её DOM-узлы)
-      // пересоздаётся заново после каждого успешного скана (refreshInProgressUi),
-      // а Scanner.onScan(cb) — подписка на глобальный document-listener (scanner.js),
-      // не привязанная к конкретным DOM-узлам. Регистрация внутри bindScannerPanel
-      // (вызывается при каждом рендере панели) копила бы обработчики и приводила
-      // к повторной обработке одного скана после переключения вкладок Сканер/Вручную.
-      const scanState = { stage: 'product', pendingProduct: null, pendingQty: 1, placing: false };
+      // Поштучная приёмка «короб → товар, товар, товар…» (короб = место склада):
+      // короб сканируется один раз, дальше каждый скан товара — +1 шт в этот короб.
+      // Сколько раз отсканировали — столько и положили.
+      //
+      // Состояние живёт ВНЕ bindScannerPanel: панель пересоздаётся при переключении
+      // вкладок Сканер/Вручную, а Scanner.onScan(cb) — подписка на глобальный
+      // document-listener (scanner.js); регистрация внутри bindScannerPanel копила бы
+      // обработчики. Сканы обрабатываются строго по очереди (scanQueue): раньше скан,
+      // пришедший во время запроса, молча отбрасывался — при поштучном счёте это
+      // потерянная единица товара.
+      const scanState = {
+        box: null, // { address }
+        boxItems: new Map(), // productId -> { name, specs, qty }
+        undoStack: [], // [{ lineId, productId, box }] — сканы текущей сессии, свежие в конце
+        productCache: new Map(), // код -> product (результат /scan/resolve)
+      };
+      let scanQueue = Promise.resolve();
       let scannerListenerBound = false;
 
-      function scanResetToProductStage() {
-        scanState.stage = 'product';
-        scanState.pendingProduct = null;
-        const preview = document.getElementById('productPreview');
-        const qtyRow = document.getElementById('qtyRow');
+      function productSpecsText(p) {
+        return [p.vendorCode && 'арт. ' + p.vendorCode, p.size, p.color].filter(Boolean).join(' · ');
+      }
+
+      function renderBoxPanel() {
         const hint = document.getElementById('stepHint');
+        const panel = document.getElementById('boxPanel');
+        if (!hint || !panel) return;
+        if (!scanState.box) {
+          hint.textContent = 'Шаг 1: отсканируйте штрихкод короба (места), в который кладёте товар';
+          panel.innerHTML = '';
+          return;
+        }
+        hint.textContent = `Шаг 2: сканируйте товары — каждый скан кладёт 1 шт в короб ${scanState.box.address}. Другой короб — просто отсканируйте его.`;
+        const items = Array.from(scanState.boxItems.values());
+        const total = items.reduce((acc, it) => acc + it.qty, 0);
+        panel.innerHTML = `
+          <div class="box-card">
+            <div class="box-head">
+              <div>
+                <div class="box-label">Короб</div>
+                <div class="box-address">${Fulfil.esc(scanState.box.address)}</div>
+              </div>
+              <div class="box-total">${total} шт</div>
+            </div>
+            ${
+              items.length
+                ? `<div class="box-items">${items
+                    .map(
+                      (it) => `<div class="box-item">
+                        <div>
+                          <div>${Fulfil.esc(it.name)}</div>
+                          ${it.specs ? `<div class="box-item__specs">${Fulfil.esc(it.specs)}</div>` : ''}
+                        </div>
+                        <div class="box-item__qty">${it.qty}</div>
+                      </div>`
+                    )
+                    .join('')}</div>`
+                : '<div class="box-item__specs">Короб пуст — сканируйте товар.</div>'
+            }
+            <div class="box-actions">
+              <button class="btn" type="button" id="btnUndoScan" ${scanState.undoStack.length ? '' : 'disabled'}>Отменить последний скан</button>
+              <button class="btn" type="button" id="btnCloseBox">Закрыть короб</button>
+            </div>
+          </div>`;
+        document.getElementById('btnUndoScan').addEventListener('click', () => enqueueScanTask(undoLastScan));
+        document.getElementById('btnCloseBox').addEventListener('click', () => {
+          scanRenderRow(`Короб ${scanState.box.address} закрыт · ${total} шт`, true);
+          scanState.box = null;
+          scanState.boxItems = new Map();
+          renderBoxPanel();
+          focusScanInput();
+        });
+      }
+
+      function focusScanInput() {
         const input = document.getElementById('scanInput');
-        if (preview) preview.style.display = 'none';
-        if (qtyRow) qtyRow.style.display = 'none';
-        if (hint) hint.textContent = 'Сейчас нужно: отсканировать баркод товара';
-        if (input) input.value = '';
+        if (input) {
+          input.value = '';
+          input.focus();
+        }
       }
 
       function scanRenderRow(text, ok) {
@@ -677,121 +737,123 @@
         log.prepend(div);
       }
 
+      function scanFail(err) {
+        Scanner.beep('error');
+        const text = typeof err === 'string' ? err : Fulfil.errorText(err);
+        Fulfil.toast(text, 'error');
+        scanRenderRow(text, false);
+      }
+
       async function scanClassify(code) {
+        const cached = scanState.productCache.get(code);
+        if (cached) return { kind: 'product', product: cached };
         try {
-          return await Fulfil.api('POST', '/scan/resolve', { code, clientId: receipt.clientId });
+          const result = await Fulfil.api('POST', '/scan/resolve', { code, clientId: receipt.clientId });
+          if (result.kind === 'product') scanState.productCache.set(code, result.product);
+          return result;
         } catch (err) {
-          Scanner.beep('error');
-          Fulfil.toast(Fulfil.errorText(err), 'error');
-          scanRenderRow(Fulfil.errorText(err), false);
+          scanFail(err);
           return null;
         }
       }
 
-      async function scanHandleProductCode(code) {
-        const result = await scanClassify(code);
-        if (!result) return;
-        if (result.kind !== 'product') {
-          Scanner.beep('error');
-          Fulfil.toast('Это код ячейки, а не товара — сначала отсканируйте товар.', 'error');
+      function openBox(cell) {
+        if (scanState.box && scanState.box.address === cell.address) {
+          Scanner.beep('ok');
           return;
+        }
+        if (scanState.box) {
+          const total = Array.from(scanState.boxItems.values()).reduce((acc, it) => acc + it.qty, 0);
+          scanRenderRow(`Короб ${scanState.box.address} закрыт · ${total} шт`, true);
         }
         Scanner.beep('ok');
-        scanState.pendingProduct = result.product;
-        const input = document.getElementById('scanInput');
-        const preview = document.getElementById('productPreview');
-        const qtyRow = document.getElementById('qtyRow');
-        const qtyInput = document.getElementById('qtyInput');
-        const hint = document.getElementById('stepHint');
-        document.getElementById('productName').textContent = result.product.name;
-        document.getElementById('productBarcode').textContent = result.product.barcode;
-        preview.style.display = 'flex';
-        qtyRow.style.display = 'flex';
-        qtyInput.value = 1;
-        qtyInput.focus();
-        qtyInput.select();
-        scanState.stage = 'qty';
-        hint.textContent = 'Укажите количество, затем отсканируйте ячейку';
-        input.value = '';
+        scanState.box = { address: cell.address };
+        scanState.boxItems = new Map();
+        renderBoxPanel();
       }
 
-      async function scanHandleCellCode(code) {
-        if (scanState.placing) return;
-        const result = await scanClassify(code);
-        if (!result) return;
-        if (result.kind !== 'cell') {
-          Scanner.beep('error');
-          Fulfil.toast('Это код товара, а не ячейки — отсканируйте ячейку.', 'error');
+      async function putProductIntoBox(product) {
+        if (!scanState.box) {
+          scanFail('Сначала отсканируйте короб (место), в который кладёте товар.');
           return;
         }
-        scanState.placing = true;
+        const box = scanState.box;
         try {
           const res = await Fulfil.api(
             'POST', `/receiving/${receiptId}/scan-place`,
-            { productBarcode: scanState.pendingProduct.barcode, cellCode: result.cell.address, qty: scanState.pendingQty },
+            { productBarcode: product.barcode, cellCode: box.address, qty: 1 },
             { 'X-Idempotency-Key': Fulfil.newIdempotencyKey() }
           );
           Scanner.beep('ok');
-          Fulfil.toast(`${res.qty} шт «${res.productName}» → ${res.cellAddress}`);
-          scanRenderRow(`${res.productName} · ${res.qty} шт · ${res.cellAddress}`, true);
-          scanResetToProductStage();
-          await loadProgress();
-          refreshInProgressUi();
+          scanState.undoStack.push({ lineId: res.lineId, productId: res.productId, box: box.address });
+          if (scanState.box && scanState.box.address === box.address) {
+            const item = scanState.boxItems.get(res.productId) || {
+              name: res.productName, specs: productSpecsText(res), qty: 0,
+            };
+            item.qty += 1;
+            scanState.boxItems.set(res.productId, item);
+          }
+          scanRenderRow(`${res.productName} +1 → ${res.cellAddress}`, true);
+          renderBoxPanel();
         } catch (err) {
-          Scanner.beep('error');
-          Fulfil.toast(Fulfil.errorText(err), 'error');
-          scanRenderRow(Fulfil.errorText(err), false);
-          const input = document.getElementById('scanInput');
-          if (input) input.value = '';
-        } finally {
-          scanState.placing = false;
+          scanFail(err);
         }
+      }
+
+      async function undoLastScan() {
+        const last = scanState.undoStack.pop();
+        if (!last) return;
+        try {
+          await Fulfil.api('POST', `/receiving/${receiptId}/lines/${last.lineId}/undo-scan`);
+          if (scanState.box && scanState.box.address === last.box) {
+            const item = scanState.boxItems.get(last.productId);
+            if (item) {
+              item.qty -= 1;
+              if (item.qty <= 0) scanState.boxItems.delete(last.productId);
+            }
+          }
+          scanRenderRow(`Отменён скан: −1 шт из ${last.box}`, true);
+          renderBoxPanel();
+        } catch (err) {
+          scanState.undoStack.push(last);
+          scanFail(err);
+        }
+        focusScanInput();
       }
 
       async function scanHandleCode(code) {
         if (!code || mode !== 'scanner') return; // переключились на «Вручную» — сканы игнорируем
-        if (scanState.stage === 'product') await scanHandleProductCode(code);
-        else await scanHandleCellCode(code);
+        const result = await scanClassify(code);
+        if (!result) return;
+        if (result.kind === 'cell') openBox(result.cell);
+        else await putProductIntoBox(result.product);
+        focusScanInput();
+      }
+
+      function enqueueScanTask(task) {
+        scanQueue = scanQueue.then(task).catch((err) => scanFail(err));
+        return scanQueue;
       }
 
       function bindScannerPanel() {
-        // Панель пересоздана целиком — визуально она всегда в стадии «скан товара»,
-        // так синхронизируем и логическое состояние (иначе первый скан после
-        // переключения вкладок мог трактоваться как скан ячейки).
-        scanState.stage = 'product';
-        scanState.pendingProduct = null;
-
         if (!scannerListenerBound) {
           scannerListenerBound = true;
           Scanner.onScan((code) => {
             const input = document.getElementById('scanInput');
             if (input) input.value = code;
-            scanHandleCode(code.trim());
+            enqueueScanTask(() => scanHandleCode(code.trim()));
           });
         }
 
         const input = document.getElementById('scanInput');
-        const qtyInput = document.getElementById('qtyInput');
-        const hint = document.getElementById('stepHint');
-
         input.addEventListener('keydown', (e) => {
           if (e.key !== 'Enter') return;
           const code = input.value.trim();
           if (!code) return;
-          scanHandleCode(code);
+          input.value = '';
+          enqueueScanTask(() => scanHandleCode(code));
         });
-        document.getElementById('qtyMinus').addEventListener('click', () => {
-          qtyInput.value = Math.max(1, Number(qtyInput.value) - 1);
-        });
-        document.getElementById('qtyPlus').addEventListener('click', () => {
-          qtyInput.value = Number(qtyInput.value) + 1;
-        });
-        document.getElementById('qtyConfirm').addEventListener('click', () => {
-          scanState.pendingQty = Number(qtyInput.value) || 1;
-          scanState.stage = 'cell';
-          hint.textContent = `Отсканируйте ячейку для ${scanState.pendingQty} шт`;
-          input.focus();
-        });
+        renderBoxPanel();
       }
 
       function renderManualPanel() {
@@ -858,7 +920,8 @@
       async function refreshInProgressUi() {
         const body = document.getElementById('modeBody');
         if (!body) return;
-        if (mode === 'manual') await loadCellSuggestions();
+        // Прогресс мог измениться сканами — ручной режим рисует таблицу по нему.
+        if (mode === 'manual') await Promise.all([loadCellSuggestions(), loadProgress()]);
         body.innerHTML = mode === 'scanner' ? renderScannerPanel() : renderManualPanel();
         if (mode === 'scanner') bindScannerPanel();
         else bindManualPanel();

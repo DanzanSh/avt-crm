@@ -286,6 +286,57 @@ def test_create_wb_warehouse_blocks_change_with_active_orders(db, seller):
     assert exc_info.value.reason_code == "client_has_active_orders"
 
 
+def test_switch_back_to_warehouse_holding_the_active_orders(db, seller):
+    """Сценарий из отчёта: заказы лежат на нашем складе, переключились на чужой
+    и хотим вернуться — возврат не должен требовать ничего, заказы как раз там."""
+    seller.wb_warehouse_id = "WH-OTHER"
+    db.commit()
+    order = _make_active_order(db, seller)
+    order.wb_warehouse_id = "WH-OURS"
+    db.commit()
+
+    updated = clients_service.set_wb_warehouse(
+        db, seller, warehouse_id="WH-OURS", warehouse_name="Наш склад", actor="tester",
+    )
+    assert updated.wb_warehouse_id == "WH-OURS"
+
+
+def test_warehouse_change_with_active_orders_allowed_with_force(db, seller):
+    seller.wb_warehouse_id = "WH-OLD"
+    db.commit()
+    order = _make_active_order(db, seller)
+    order.wb_warehouse_id = "WH-OLD"
+    db.commit()
+
+    with pytest.raises(AppError) as exc_info:
+        clients_service.set_wb_warehouse(db, seller, warehouse_id="WH-NEW", warehouse_name="Новый", actor="tester")
+    assert exc_info.value.extra["activeCount"] == 1
+    assert exc_info.value.extra["warehouses"][0]["id"] == "WH-OLD"
+
+    updated = clients_service.set_wb_warehouse(
+        db, seller, warehouse_id="WH-NEW", warehouse_name="Новый", actor="tester", force=True,
+    )
+    assert updated.wb_warehouse_id == "WH-NEW"
+
+
+def test_warehouse_change_force_via_api(api, db, seller):
+    from conftest import auth_headers, make_user
+
+    seller.wb_warehouse_id = "WH-OLD"
+    db.commit()
+    _make_active_order(db, seller)
+    headers = auth_headers(make_user(db, "wh-switcher"))
+    body = {"warehouseId": "WH-NEW", "warehouseName": "Новый"}
+
+    resp = api.post(f"/api/v1/clients/{seller.id}/wb-warehouses/select", json=body, headers=headers)
+    assert resp.status_code == 409 and resp.json()["reasonCode"] == "client_has_active_orders"
+
+    resp = api.post(
+        f"/api/v1/clients/{seller.id}/wb-warehouses/select", json={**body, "force": True}, headers=headers
+    )
+    assert resp.status_code == 200 and resp.json()["wbWarehouseId"] == "WH-NEW"
+
+
 # --- Восстановление только хостом и удаление клиента (problems.txt, п.5) ---
 
 

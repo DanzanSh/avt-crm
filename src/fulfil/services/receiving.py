@@ -489,16 +489,24 @@ def place_stock(
     return row
 
 
-def add_receipt_line(
-    db: Session, receipt: Receipt, product: Product, cell: Cell, qty: int, actor: str = "system",
-    *, commit: bool = True,
-) -> ReceiptLine:
+def _require_in_progress(receipt: Receipt) -> None:
     if receipt.status != ReceiptStatus.IN_PROGRESS:
         raise AppError(
             f'Приёмка в статусе "{receipt.status.value}" — принимать товар можно только в "Идёт приёмка".',
             status_code=409,
             reason_code="wrong_status",
         )
+
+
+def add_receipt_line(
+    db: Session, receipt: Receipt, product: Product, cell: Cell, qty: int, actor: str = "system",
+    *, commit: bool = True, merge_with_last: bool = False,
+) -> ReceiptLine:
+    """merge_with_last — поштучный скан «короб → товар, товар, товар…»: если
+    последняя строка этой приёмки — тот же товар в ту же ячейку тем же
+    сотрудником, количество прибавляется к ней, а не плодит строки по 1 шт.
+    Движение остатка всё равно пишется на каждый скан (ref на ту же строку)."""
+    _require_in_progress(receipt)
     if product.client_id != receipt.client_id:
         raise AppError(
             "Товар принадлежит другому клиенту — не найден в приёмке.",
@@ -508,10 +516,23 @@ def add_receipt_line(
     # Порядок важен: сперва строка приёмки (нужен line.id для ref_id движения),
     # затем размещение остатка без коммита — оба в одной транзакции. Падение между
     # шагами больше не оставляет товар на остатке без строки истории.
-    line = ReceiptLine(
-        receipt_id=receipt.id, product_id=product.id, cell_id=cell.id, qty=qty, actor=actor
-    )
-    db.add(line)
+    line = None
+    if merge_with_last:
+        last = db.scalar(
+            select(ReceiptLine)
+            .where(ReceiptLine.receipt_id == receipt.id)
+            .order_by(ReceiptLine.id.desc())
+            .limit(1)
+            .with_for_update()
+        )
+        if last is not None and (last.product_id, last.cell_id, last.actor) == (product.id, cell.id, actor):
+            line = last
+            line.qty += qty
+    if line is None:
+        line = ReceiptLine(
+            receipt_id=receipt.id, product_id=product.id, cell_id=cell.id, qty=qty, actor=actor
+        )
+        db.add(line)
     db.flush()
     place_stock(
         db, product, cell, qty, actor=actor,
@@ -519,6 +540,43 @@ def add_receipt_line(
     )
     if commit:
         db.commit()
+        db.refresh(line)
+    return line
+
+
+def undo_receipt_scan(db: Session, receipt: Receipt, line_id: int, actor: str) -> ReceiptLine | None:
+    """«Отменить последний скан» — снимает 1 шт со строки приёмки и с остатка
+    ячейки (обратное движение RECEIPT). Строка, дошедшая до нуля, удаляется;
+    возвращает строку после уменьшения или None, если она удалена."""
+    _require_in_progress(receipt)
+    line = db.scalar(
+        select(ReceiptLine)
+        .where(ReceiptLine.id == line_id, ReceiptLine.receipt_id == receipt.id)
+        .with_for_update()
+    )
+    if line is None:
+        raise NotFoundError(f"Строка приёмки #{line_id} не найдена.")
+    product = db.get(Product, line.product_id)
+    cell = db.get(Cell, line.cell_id)
+    in_cell = db.scalar(
+        select(StockByCell.qty).where(StockByCell.product_id == product.id, StockByCell.cell_id == cell.id)
+    ) or 0
+    if in_cell < 1:
+        raise AppError(
+            f"В месте {cell.address} уже нет «{product.name}» — товар успели переместить или собрать.",
+            status_code=409,
+            reason_code="nothing_to_undo",
+        )
+    apply_move(
+        db, product=product, cell=cell, qty_delta=-1, reason=MoveReason.RECEIPT, actor=actor,
+        ref_type="receipt_line", ref_id=line.id, comment="Отмена скана при приёмке",
+    )
+    line.qty -= 1
+    if line.qty <= 0:
+        db.delete(line)
+        line = None
+    db.commit()
+    if line is not None:
         db.refresh(line)
     return line
 
@@ -579,6 +637,9 @@ def list_receipt_lines(
             Client.name.label("client_name"),
             Product.name,
             Product.barcode,
+            Product.vendor_code,
+            Product.size,
+            Product.color,
             Cell.address,
             ReceiptLine.qty,
             ReceiptLine.actor,
@@ -605,6 +666,9 @@ def list_receipt_lines(
             "clientName": r.client_name,
             "productName": r.name,
             "barcode": r.barcode,
+            "vendorCode": r.vendor_code,
+            "size": r.size,
+            "color": r.color,
             "cellAddress": r.address,
             "qty": r.qty,
             "actor": r.actor,

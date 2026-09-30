@@ -143,7 +143,15 @@ class WBClient(Protocol):
         """Возвращает wb_supply_id."""
         ...
 
-    def add_order_to_supply(self, supply_id: str, order_id: str) -> dict: ...
+    def add_orders_to_supply(self, supply_id: str, order_ids: list[str]) -> dict:
+        """Добавляет заказы в поставку — PATCH /api/marketplace/v3/supplies/{id}/orders
+        (не больше 100 за вызов, батчит реализация). Старый поштучный
+        PATCH /api/v3/supplies/{id}/orders/{orderId} WB убрал — отвечает 404."""
+        ...
+
+    def delete_supply(self, supply_id: str) -> dict:
+        """DELETE /api/v3/supplies/{id} — WB удаляет только открытую поставку без заказов."""
+        ...
 
     def close_supply(self, supply_id: str) -> dict: ...
 

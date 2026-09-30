@@ -657,31 +657,66 @@ def find_free_cell_suggestions(db: Session, zone_code: str | None = None, limit:
     return [{"address": c.address, "barcode": c.barcode} for c in db.scalars(stmt)]
 
 
+def _product_card(r) -> dict:
+    """Название WB часто не различает товары (размер/цвет) и совпадает у разных
+    клиентов — рядом с названием всегда отдаём характеристики и клиента."""
+    return {
+        "productId": r.id,
+        "productName": r.name,
+        "barcode": r.barcode,
+        "vendorCode": r.vendor_code,
+        "size": r.size,
+        "color": r.color,
+        "brand": r.brand,
+        "clientName": r.client_name,
+        "imageUrl": r.image_url,
+    }
+
+
+def _product_card_columns():
+    return (
+        Product.id,
+        Product.name,
+        Product.barcode,
+        Product.vendor_code,
+        Product.size,
+        Product.color,
+        Product.brand,
+        Product.image_url,
+        Client.name.label("client_name"),
+    )
+
+
 def get_cell_contents(db: Session, cell: Cell) -> list[dict]:
     """Содержимое места: товары с положительным остатком в этой ячейке (C.1).
     Join stock_by_cell → products по cell_id, только qty > 0, сортировка по названию."""
     rows = db.execute(
-        select(
-            Product.id,
-            Product.name,
-            Product.barcode,
-            Product.image_url,
-            StockByCell.qty,
-        )
+        select(*_product_card_columns(), StockByCell.qty)
         .join(StockByCell, StockByCell.product_id == Product.id)
+        .outerjoin(Client, Client.id == Product.client_id)
         .where(StockByCell.cell_id == cell.id, StockByCell.qty > 0)
         .order_by(Product.name)
     ).all()
-    return [
-        {
-            "productId": r.id,
-            "productName": r.name,
-            "barcode": r.barcode,
-            "imageUrl": r.image_url,
-            "qty": r.qty,
-        }
-        for r in rows
-    ]
+    return [{**_product_card(r), "qty": r.qty} for r in rows]
+
+
+def describe_allowed_barcodes(db: Session, cell: Cell) -> list[dict]:
+    """Допуск ячейки хранится голыми баркодами — расшифровываем их в товары
+    каталога. Баркод уникален только в пределах клиента, поэтому товаров у
+    одного баркода может быть несколько (у разных клиентов)."""
+    barcodes = [a.barcode for a in cell.allowed_barcodes]
+    if not barcodes:
+        return []
+    rows = db.execute(
+        select(*_product_card_columns())
+        .outerjoin(Client, Client.id == Product.client_id)
+        .where(Product.barcode.in_(barcodes), Product.archived_at.is_(None))
+        .order_by(Client.name, Product.name)
+    ).all()
+    by_barcode: dict[str, list[dict]] = {b: [] for b in barcodes}
+    for r in rows:
+        by_barcode[r.barcode].append(_product_card(r))
+    return [{"barcode": b, "products": by_barcode[b]} for b in barcodes]
 
 
 def get_cell_map(db: Session) -> dict:

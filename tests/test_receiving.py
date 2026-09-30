@@ -551,3 +551,66 @@ def test_update_date_only_keeps_client_and_plan(db, seller):
     assert receipt.client_id == seller.id
     assert len(receipt.plan_lines) == 1
     assert receipt.comment == "c"
+
+
+# --- Поштучный скан «короб → товар, товар, товар…» -----------------------------
+
+
+def test_consecutive_scans_merge_into_one_line(db, seller):
+    """Короб отсканирован один раз, товар — трижды: одна строка на 3 шт, остаток 3.
+    Другой товар или другой короб — уже новая строка."""
+    from fulfil.models.receiving import ReceiptLine
+
+    tee = _make_product(db, seller, barcode="2000000000017", name="Футболка")
+    cap = _make_product(db, seller, barcode="2000000000024", name="Кепка")
+    box1, box2 = generate_cells(db, "A", racks=1, cells_per_rack=2)
+    receipt = _started_receipt(db, seller)
+
+    for _ in range(3):
+        line = add_receipt_line(db, receipt, tee, box1, 1, actor="op", merge_with_last=True)
+    assert line.qty == 3
+    add_receipt_line(db, receipt, cap, box2, 1, actor="op", merge_with_last=True)
+    add_receipt_line(db, receipt, tee, box1, 1, actor="op", merge_with_last=True)
+
+    lines = db.scalars(select(ReceiptLine).where(ReceiptLine.receipt_id == receipt.id).order_by(ReceiptLine.id)).all()
+    assert [(ln.product_id, ln.qty) for ln in lines] == [(tee.id, 3), (cap.id, 1), (tee.id, 1)]
+    assert get_cell_contents(db, box1)[0]["qty"] == 4
+    # Каждый скан — своё движение остатка.
+    moves = db.scalars(select(StockMove).where(StockMove.product_id == tee.id)).all()
+    assert len(moves) == 4
+
+
+def test_undo_scan_takes_one_unit_back(db, seller):
+    from fulfil.models.receiving import ReceiptLine
+    from fulfil.services.receiving import undo_receipt_scan
+
+    tee = _make_product(db, seller)
+    [box] = generate_cells(db, "A", racks=1, cells_per_rack=1)
+    receipt = _started_receipt(db, seller)
+    for _ in range(2):
+        line = add_receipt_line(db, receipt, tee, box, 1, actor="op", merge_with_last=True)
+
+    left = undo_receipt_scan(db, receipt, line.id, actor="op")
+    assert left.qty == 1
+    assert get_cell_contents(db, box)[0]["qty"] == 1
+
+    assert undo_receipt_scan(db, receipt, line.id, actor="op") is None
+    assert db.get(ReceiptLine, line.id) is None
+    assert get_cell_contents(db, box) == []
+
+
+def test_undo_scan_refused_when_unit_already_gone(db, seller):
+    from fulfil.models.stock import MoveReason
+    from fulfil.services.receiving import undo_receipt_scan
+    from fulfil.services.stock_ledger import apply_move
+
+    tee = _make_product(db, seller)
+    [box] = generate_cells(db, "A", racks=1, cells_per_rack=1)
+    receipt = _started_receipt(db, seller)
+    line = add_receipt_line(db, receipt, tee, box, 1, actor="op", merge_with_last=True)
+    apply_move(db, product=tee, cell=box, qty_delta=-1, reason=MoveReason.PICK, actor="picker")
+    db.commit()
+
+    with pytest.raises(AppError) as exc_info:
+        undo_receipt_scan(db, receipt, line.id, actor="op")
+    assert exc_info.value.reason_code == "nothing_to_undo"

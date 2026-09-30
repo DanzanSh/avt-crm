@@ -161,7 +161,9 @@
               ${s.orders.map(ordersLineHtml).join('')}
             </div>
             <div class="supply-actions">
+              ${canClose && s.orders.some((o) => o.status === 'confirmed' || o.status === 'in_assembly') ? `<a class="btn btn-primary" href="/fbs/picking.html?batch=1&supplyId=${s.id}">Собрать</a>` : ''}
               ${canClose ? `<button class="btn btn-close" data-id="${s.id}">Закрыть поставку</button>` : ''}
+              ${canClose && !s.orders.length ? `<button class="btn btn-danger btn-delete" data-id="${s.id}" data-name="${Fulfil.esc(s.wbSupplyId || s.name || '')}">Удалить</button>` : ''}
               ${canQr ? `<button class="btn btn-qr" data-id="${s.id}">QR поставки</button>` : ''}
               ${canQr ? `<button class="btn btn-boxes" data-id="${s.id}">QR коробов</button>` : ''}
             </div>
@@ -181,6 +183,9 @@
           })
         );
         document.querySelectorAll('.btn-close').forEach((b) => b.addEventListener('click', () => closeSupply(b.dataset.id)));
+        document.querySelectorAll('.btn-delete').forEach((b) =>
+          b.addEventListener('click', () => deleteSupply(b.dataset.id, b.dataset.name))
+        );
         document.querySelectorAll('.btn-qr').forEach((b) => b.addEventListener('click', () => showQr(b.dataset.id)));
         document.querySelectorAll('.btn-boxes').forEach((b) => b.addEventListener('click', () => showBoxes(b.dataset.id)));
       } catch (err) {
@@ -222,7 +227,11 @@
     });
 
     async function closeSupply(id) {
-      const ok = confirm('Поставка будет передана в доставку на Wildberries. Обратной операции нет. Продолжить?');
+      const ok = await Fulfil.confirmModal({
+        title: 'Закрыть поставку?',
+        message: 'Поставка будет передана в доставку на Wildberries. Обратной операции нет.',
+        confirmLabel: 'Закрыть поставку',
+      });
       if (!ok) return;
       try {
         await Fulfil.api('POST', `/fbs/supplies/${id}/close`);
@@ -235,6 +244,23 @@
         } else {
           Fulfil.toast(Fulfil.errorText(err), 'error');
         }
+      }
+    }
+
+    async function deleteSupply(id, name) {
+      const ok = await Fulfil.confirmModal({
+        title: 'Удалить поставку?',
+        message: `Поставка ${name} будет удалена и в Fulfil, и в Wildberries. Удалить можно только пустую открытую поставку.`,
+        confirmLabel: 'Удалить',
+        danger: true,
+      });
+      if (!ok) return;
+      try {
+        await Fulfil.api('DELETE', `/fbs/supplies/${id}`);
+        Fulfil.toast('Поставка удалена');
+        load();
+      } catch (err) {
+        Fulfil.toast(Fulfil.errorText(err), 'error');
       }
     }
 

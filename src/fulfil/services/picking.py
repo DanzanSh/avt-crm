@@ -131,3 +131,61 @@ def commit_pick_lines(db: Session, order: Order, actor: str = "system") -> None:
             actor=actor, ref_type="order", ref_id=order.id,
         )
         line.picked_at = dt.datetime.now(dt.timezone.utc)
+
+
+def build_batch_pick_list(db: Session, orders: list[Order]) -> dict:
+    """Сводный лист подбора по нескольким заказам (п.6 обратной связи): заказ WB —
+    это всегда 1 шт, и сборка «по заказу» превращалась в десятки карточек «1 шт».
+    Здесь те же листы подбора каждого заказа (build_pick_list — резервы и маршрут
+    уже учтены) сворачиваются по (товар, ячейка) и идут по маршруту склада.
+
+    Заказ, для которого не хватило остатка, не валит весь лист — он уходит в
+    problems, остальные собираются."""
+    grouped: dict[tuple[int, int], dict] = {}
+    problems: list[dict] = []
+    for order in orders:
+        try:
+            lines = [ln for ln in build_pick_list(db, order) if ln.picked_at is None]
+        except AppError as exc:
+            db.rollback()
+            problems.append({"orderId": order.id, "wbOrderId": order.wb_order_id, "error": exc.detail})
+            continue
+        for ln in lines:
+            entry = grouped.setdefault(
+                (ln.product_id, ln.cell_id),
+                {"productId": ln.product_id, "cellId": ln.cell_id, "qty": 0, "orderIds": []},
+            )
+            entry["qty"] += ln.qty
+            entry["orderIds"].append(order.id)
+
+    if not grouped:
+        return {"lines": [], "problems": problems}
+
+    products = {
+        p.id: p
+        for p in db.scalars(select(Product).where(Product.id.in_({k[0] for k in grouped})))
+    }
+    cells = {c.id: c for c in db.scalars(select(Cell).where(Cell.id.in_({k[1] for k in grouped})))}
+
+    def route_key(entry: dict) -> tuple:
+        c = cells[entry["cellId"]]
+        return (c.zone_code, c.rack_no, c.shelf_no, c.cell_no)
+
+    out = []
+    for seq, entry in enumerate(sorted(grouped.values(), key=route_key), start=1):
+        product = products[entry["productId"]]
+        out.append(
+            {
+                **entry,
+                "seq": seq,
+                "cellAddress": cells[entry["cellId"]].address,
+                "productName": product.name,
+                "vendorCode": product.vendor_code,
+                "size": product.size,
+                "color": product.color,
+                "barcode": product.barcode,
+                "imageUrl": product.image_url,
+                "ordersCount": len(set(entry["orderIds"])),
+            }
+        )
+    return {"lines": out, "problems": problems}

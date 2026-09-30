@@ -6,7 +6,8 @@ from fulfil.auth import get_current_user
 from fulfil.db import get_db
 from fulfil.errors import AppError, NotFoundError
 from fulfil.integrations.wb import get_wb_client
-from fulfil.models.fbs import Order, OrderItem, Supply
+from fulfil.models.client import deleted_client_ids
+from fulfil.models.fbs import Order, OrderItem, OrderStatus, Supply
 from fulfil.schemas.fbs import (
     CreateBoxesRequest,
     CreateSupplyRequest,
@@ -110,6 +111,28 @@ def get_pick_list(order_id: int, db: Session = Depends(get_db)) -> list[dict]:
     return out
 
 
+@router.get("/pick-lists/batch")
+def get_batch_pick_list(
+    client_id: int | None = None, supply_id: int | None = None, db: Session = Depends(get_db),
+) -> dict:
+    """Сводный лист подбора по всем заказам «на сборке» (клиент и/или поставка —
+    фильтры). orders — те же заказы для этапа раскладки по стикерам."""
+    stmt = (
+        select(Order)
+        .where(Order.status.in_((OrderStatus.CONFIRMED, OrderStatus.IN_ASSEMBLY)))
+        .where(Order.client_id.not_in(deleted_client_ids()))
+        .order_by(Order.id)
+    )
+    if client_id is not None:
+        stmt = stmt.where(Order.client_id == client_id)
+    if supply_id is not None:
+        stmt = stmt.where(Order.supply_id == supply_id)
+    orders = list(db.scalars(stmt))
+    result = picking_service.build_batch_pick_list(db, orders)
+    result["orders"] = [OrderOut.model_validate(o).model_dump(by_alias=True) for o in orders]
+    return result
+
+
 @router.get("/orders/{order_id}/sticker")
 def get_sticker(order_id: int, db: Session = Depends(get_db)) -> dict:
     order = orders_service.get_order_or_404(db, order_id)
@@ -192,6 +215,17 @@ def add_order_to_supply(supply_id: int, order_id: int, db: Session = Depends(get
     order = orders_service.get_order_or_404(db, order_id)
     wb_client = get_wb_client(supply.client)
     supplies_service.add_order_to_supply(db, supply, order, wb_client)
+    return {"ok": True}
+
+
+@router.delete("/supplies/{supply_id}")
+def delete_supply(
+    supply_id: int, db: Session = Depends(get_db), user: dict = Depends(get_current_user)
+) -> dict:
+    """Только открытая пустая поставка — так разрешает WB."""
+    supply = _get_supply(db, supply_id)
+    wb_client = get_wb_client(supply.client)
+    supplies_service.delete_supply(db, supply, wb_client, actor=user.get("sub", "system"))
     return {"ok": True}
 
 

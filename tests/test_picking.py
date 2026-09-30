@@ -150,3 +150,28 @@ def test_rebuild_pick_list_recovers_after_stock_changed(db, seller):
     with pytest.raises(AppError) as exc_info:
         rebuild_pick_list(db, order_b)
     assert exc_info.value.reason_code == "not_enough_stock"
+
+
+def test_batch_pick_list_aggregates_one_unit_orders_by_product_and_cell(db, seller):
+    """Пять заказов WB по 1 шт одного товара — одна строка «5 шт» сводного листа,
+    а не пять карточек «1 шт». Заказ без остатка уходит в problems."""
+    from fulfil.services.picking import build_batch_pick_list
+
+    tee = _make_product(db, seller, barcode="2000000000017", name="Футболка")
+    cap = _make_product(db, seller, barcode="2000000000024", name="Кепка")
+    ghost = _make_product(db, seller, barcode="2000000000031", name="Нет на складе")
+    cell_a, cell_b = generate_cells(db, "A", racks=1, cells_per_rack=2)
+    place_stock(db, tee, cell_b, 10)
+    place_stock(db, cap, cell_a, 10)
+
+    orders = [_make_order(db, tee, 1, wb_order_id=f"T-{i}") for i in range(5)]
+    orders.append(_make_order(db, cap, 1, wb_order_id="C-1"))
+    orders.append(_make_order(db, ghost, 1, wb_order_id="G-1"))
+
+    result = build_batch_pick_list(db, orders)
+
+    assert [(ln["cellAddress"], ln["productName"], ln["qty"], ln["ordersCount"]) for ln in result["lines"]] == [
+        (cell_a.address, "Кепка", 1, 1),
+        (cell_b.address, "Футболка", 5, 5),
+    ]
+    assert [p["wbOrderId"] for p in result["problems"]] == ["G-1"]

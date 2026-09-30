@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session, selectinload
 from fulfil.errors import AppError, WbApiError
 from fulfil.integrations.wb import get_wb_client
 from fulfil.integrations.wb.base import WBClient, parse_wb_datetime
+from fulfil.models import audit
 from fulfil.models.client import Client, deleted_client_ids
 from fulfil.models.fbs import Order, OrderStatus, Supply, SupplyBox, SupplyStatus
 from fulfil.models.integration_state import IntegrationState
@@ -52,38 +53,80 @@ def _status_from_wb(done: bool, scan_dt: dt.datetime | None) -> SupplyStatus:
     return SupplyStatus.OPEN
 
 
-def create_supply(db: Session, client: Client, wb_client: WBClient, *, name: str | None = None) -> Supply:
+def create_supply(
+    db: Session, client: Client, wb_client: WBClient, *, name: str | None = None, commit: bool = True
+) -> Supply:
+    """commit=False — поставка только flush'ится: «Взять в работу» коммитит её
+    вместе с заказами и откатывает, если WB не принял заказы (иначе оставалась
+    пустая «зависшая» поставка, в которую потом безуспешно лезли все заказы)."""
     if name is None:
         name = f"{client.name} {dt.date.today().isoformat()}"
     wb_supply_id = wb_client.create_supply(name)
     supply = Supply(client_id=client.id, wb_supply_id=wb_supply_id, name=name, status=SupplyStatus.OPEN)
     db.add(supply)
-    db.commit()
-    db.refresh(supply)
+    if commit:
+        db.commit()
+        db.refresh(supply)
+    else:
+        db.flush()
     return supply
 
 
-def add_order_to_supply(db: Session, supply: Supply, order: Order, wb_client: WBClient) -> None:
+def add_orders_to_supply(db: Session, supply: Supply, orders: list[Order], wb_client: WBClient) -> None:
+    """Одним вызовом WB (батчи по 100 — внутри клиента), затем один commit.
+    Если WB отказал — ничего локально не меняется, WbApiError летит наверх."""
     if supply.status != SupplyStatus.OPEN:
         raise AppError(
             f'Поставка в статусе "{supply.status.value}" — заказ добавить нельзя.',
             status_code=409,
             reason_code="wrong_status",
         )
-    if order.client_id != supply.client_id:
+    for order in orders:
+        if order.client_id != supply.client_id:
+            raise AppError(
+                "Заказ и поставка принадлежат разным клиентам — добавить нельзя.",
+                status_code=409,
+                reason_code="client_mismatch",
+            )
+    wb_client.add_orders_to_supply(supply.wb_supply_id, [o.wb_order_id for o in orders])
+    for order in orders:
+        order.supply_id = supply.id
+        if order.status == OrderStatus.NEW:
+            # Добавление в поставку — это и есть подтверждение заказа на WB (Этап 3,
+            # п.3.2, problems.txt №3): подтверждённый заказ идёт в сборку
+            # (CONFIRMED/IN_ASSEMBLY -> confirm-assembly -> PACKED), а не «в поставку».
+            order.status = OrderStatus.CONFIRMED
+    db.commit()
+
+
+def add_order_to_supply(db: Session, supply: Supply, order: Order, wb_client: WBClient) -> None:
+    add_orders_to_supply(db, supply, [order], wb_client)
+
+
+def delete_supply(db: Session, supply: Supply, wb_client: WBClient, *, actor: str) -> None:
+    """Удаление открытой пустой поставки — WB разрешает только такое
+    (DELETE /api/v3/supplies/{id}). Нужно, чтобы убрать поставку, созданную по
+    ошибке или оставшуюся пустой после сбоя «Взять в работу»."""
+    if supply.status != SupplyStatus.OPEN:
         raise AppError(
-            "Заказ и поставка принадлежат разным клиентам — добавить нельзя.",
+            "Удалить можно только открытую поставку — эта уже передана в доставку.",
             status_code=409,
-            reason_code="client_mismatch",
+            reason_code="wrong_status",
         )
-    wb_client.add_order_to_supply(supply.wb_supply_id, order.wb_order_id)
-    order.supply_id = supply.id
-    if order.status == OrderStatus.NEW:
-        # Добавление в поставку — это и есть подтверждение заказа на WB (Этап 3,
-        # п.3.2, problems.txt №3): раньше здесь стоял IN_SUPPLY, статус, до которого
-        # в новой модели дело не доходит — подтверждённый заказ идёт в сборку
-        # (CONFIRMED/IN_ASSEMBLY -> confirm-assembly -> PACKED), а не «в поставку».
-        order.status = OrderStatus.CONFIRMED
+    has_orders = db.scalar(select(func.count()).select_from(Order).where(Order.supply_id == supply.id)) or 0
+    if has_orders:
+        raise AppError(
+            f"В поставке {has_orders} заказ(ов) — удалить можно только пустую поставку.",
+            status_code=409,
+            reason_code="supply_not_empty",
+        )
+    if supply.wb_supply_id:
+        wb_client.delete_supply(supply.wb_supply_id)
+    audit.record(
+        db, entity_type="supply", entity_id=supply.id, action="delete", actor=actor,
+        changes={"wbSupplyId": {"from": supply.wb_supply_id, "to": None}, "name": {"from": supply.name, "to": None}},
+    )
+    db.delete(supply)
     db.commit()
 
 

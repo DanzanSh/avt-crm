@@ -8,7 +8,7 @@
 
 import datetime as dt
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from fulfil.errors import AppError, NotFoundError
@@ -51,25 +51,48 @@ def list_syncable_clients(db: Session) -> list[Client]:
     )
 
 
-def _check_warehouse_change_allowed(db: Session, client: Client) -> None:
-    """Смена склада WB при активных заказах обрывает их синхронизацию (P2-16):
-    sync_orders_from_wb фильтрует заказы строго по client.wb_warehouse_id, поэтому
-    заказы, пришедшие на старый склад, после смены переставали бы находиться."""
-    if not client.wb_warehouse_id:
-        return
-    active_count = db.scalar(
-        select(func.count())
-        .select_from(Order)
+def _check_warehouse_change_allowed(
+    db: Session, client: Client, new_warehouse_id: str | None, *, force: bool = False
+) -> int:
+    """Смена склада WB при активных заказах на ДРУГИХ складах требует
+    подтверждения (P2-16): sync_orders_from_wb забирает новые заказы строго по
+    client.wb_warehouse_id, поэтому новые заказы со старого склада перестанут
+    приходить. Уже импортированные заказы и после смены доводятся до конца —
+    refresh_order_statuses опрашивает их по клиенту, не по складу.
+
+    Раньше смена запрещалась совсем и считались ВСЕ активные заказы клиента, в
+    том числе лежащие на том складе, на который переключаемся, — вернуть свой
+    склад после пробы чужого было невозможно. Возвращает число «осиротевших»
+    активных заказов (для аудита)."""
+    if not client.wb_warehouse_id or new_warehouse_id == client.wb_warehouse_id:
+        return 0
+    stmt = (
+        select(Order.wb_warehouse_id, func.count())
         .where(Order.client_id == client.id, Order.status.in_(_ACTIVE_ORDER_STATUSES))
-    ) or 0
-    if active_count:
+        .group_by(Order.wb_warehouse_id)
+    )
+    if new_warehouse_id:
+        stmt = stmt.where(or_(Order.wb_warehouse_id.is_(None), Order.wb_warehouse_id != new_warehouse_id))
+    by_warehouse = {wh or client.wb_warehouse_id: cnt for wh, cnt in db.execute(stmt).all()}
+    active_count = sum(by_warehouse.values())
+    if active_count and not force:
+        def _label(wh: str) -> str:
+            return client.wb_warehouse_name or wh if wh == client.wb_warehouse_id else wh
+
+        names = ", ".join(f"«{_label(wh)}» — {cnt}" for wh, cnt in by_warehouse.items())
         raise AppError(
-            f'У клиента «{client.name}» есть {active_count} активных заказов ФБС на складе '
-            f'«{client.wb_warehouse_name or client.wb_warehouse_id}» — сначала завершите или '
-            f'отмените их, иначе синхронизация этого склада прекратится.',
+            f'У клиента «{client.name}» есть {active_count} активных заказов ФБС на других складах '
+            f'({names}). Их статусы продолжат обновляться, но новые заказы с этих складов '
+            f'перестанут подтягиваться.',
             status_code=409,
             reason_code="client_has_active_orders",
+            what_to_do="Подтвердите смену склада, если это ожидаемо.",
+            extra={
+                "activeCount": active_count,
+                "warehouses": [{"id": wh, "name": _label(wh), "count": cnt} for wh, cnt in by_warehouse.items()],
+            },
         )
+    return active_count
 
 
 def _check_name_unique(db: Session, name: str, *, exclude_id: int | None = None) -> None:
@@ -109,6 +132,7 @@ def create_client(
 def update_client(
     db: Session, client: Client, *, name: str | None = None, api_key: str | None = None,
     wb_warehouse_id: str | None = None, wb_warehouse_name: str | None = None, actor: str,
+    force: bool = False,
 ) -> Client:
     """api_key: пусто/None — не менять (Этап 1, п.1.4). Значение ключа никогда не
     попадает в audit_log — пишем только факт смены."""
@@ -126,7 +150,9 @@ def update_client(
         changes["apiKey"] = {"from": "***", "to": "***"}
 
     if wb_warehouse_id is not None and wb_warehouse_id != client.wb_warehouse_id:
-        _check_warehouse_change_allowed(db, client)
+        orphaned = _check_warehouse_change_allowed(db, client, wb_warehouse_id or None, force=force)
+        if orphaned:
+            changes["activeOrdersOnOldWarehouses"] = {"from": orphaned, "to": orphaned}
         changes["wbWarehouseId"] = {"from": client.wb_warehouse_id, "to": wb_warehouse_id}
         client.wb_warehouse_id = wb_warehouse_id or None
 
@@ -359,19 +385,23 @@ def list_wb_warehouses(wb_client: WBClient) -> list[dict]:
 
 def create_wb_warehouse(
     db: Session, client: Client, wb_client: WBClient, *, name: str, office_id: int, actor: str,
+    force: bool = False,
 ) -> Client:
     """Создаёт склад в WB и сразу привязывает его к клиенту — раздельного «создать,
     а потом выбрать из списка» шага в интерфейсе нет, это одно действие."""
     name = name.strip()
     if not name:
         raise AppError("Название склада не может быть пустым.", status_code=400, reason_code="invalid_name")
-    _check_warehouse_change_allowed(db, client)
+    # Новый склад заведомо пуст — активные заказы любого текущего склада «осиротеют».
+    orphaned = _check_warehouse_change_allowed(db, client, "", force=force)
 
     warehouse = wb_client.create_warehouse(name, office_id)
     changes = {
         "wbWarehouseId": {"from": client.wb_warehouse_id, "to": warehouse["id"]},
         "wbWarehouseName": {"from": client.wb_warehouse_name, "to": warehouse["name"]},
     }
+    if orphaned:
+        changes["activeOrdersOnOldWarehouses"] = {"from": orphaned, "to": orphaned}
     client.wb_warehouse_id = warehouse["id"]
     client.wb_warehouse_name = warehouse["name"]
     audit.record(db, entity_type="client", entity_id=client.id, action="update", actor=actor, changes=changes)
@@ -382,14 +412,17 @@ def create_wb_warehouse(
 
 def set_wb_warehouse(
     db: Session, client: Client, *, warehouse_id: str, warehouse_name: str, actor: str,
+    force: bool = False,
 ) -> Client:
     """Привязывает УЖЕ существующий в WB склад (выбор из GET .../wb-warehouses) —
     в отличие от create_wb_warehouse, ничего не создаёт на стороне WB."""
-    _check_warehouse_change_allowed(db, client)
+    orphaned = _check_warehouse_change_allowed(db, client, warehouse_id, force=force)
     changes = {
         "wbWarehouseId": {"from": client.wb_warehouse_id, "to": warehouse_id},
         "wbWarehouseName": {"from": client.wb_warehouse_name, "to": warehouse_name},
     }
+    if orphaned:
+        changes["activeOrdersOnOldWarehouses"] = {"from": orphaned, "to": orphaned}
     client.wb_warehouse_id = warehouse_id
     client.wb_warehouse_name = warehouse_name
     audit.record(db, entity_type="client", entity_id=client.id, action="update", actor=actor, changes=changes)

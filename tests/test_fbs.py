@@ -21,8 +21,10 @@ from fulfil.services.orders import (
     take_to_work_bulk,
 )
 from fulfil.services.supplies import (
+    add_order_to_supply,
     close_supply,
     create_supply,
+    delete_supply,
     get_supply_counters,
     list_supplies,
     sync_supplies,
@@ -547,6 +549,75 @@ def test_take_to_work_bulk_reports_missing_order(db):
     ]
 
 
+def test_take_to_work_bulk_adds_client_orders_in_one_wb_call(db, seller, monkeypatch):
+    """WB убрал поштучный PATCH .../orders/{orderId} — заказы клиента уходят
+    одним пакетным вызовом marketplace/v3."""
+    orders = [Order(client_id=seller.id, wb_order_id=f"ONE-{i}", status=OrderStatus.NEW) for i in range(3)]
+    db.add_all(orders)
+    db.commit()
+
+    calls = []
+
+    class _CountingMock(WBMockClient):
+        def add_orders_to_supply(self, supply_id, order_ids):
+            calls.append(list(order_ids))
+            return super().add_orders_to_supply(supply_id, order_ids)
+
+    wb = _CountingMock(client_id=seller.id)
+    monkeypatch.setattr("fulfil.services.orders.get_wb_client", lambda client: wb)
+
+    results = take_to_work_bulk(db, [o.id for o in orders])
+
+    assert all(r["ok"] for r in results)
+    assert calls == [["ONE-0", "ONE-1", "ONE-2"]]
+
+
+def test_take_to_work_wb_failure_leaves_no_empty_supply(db, seller):
+    """Сбой добавления заказов в только что созданную поставку — поставка не
+    остаётся ни локально, ни в WB (раньше «зависала» пустой и ломала все
+    последующие «Взять в работу»)."""
+    order = Order(client_id=seller.id, wb_order_id="FAIL-1", status=OrderStatus.NEW)
+    db.add(order)
+    db.commit()
+
+    class _FailingMock(WBMockClient):
+        def add_orders_to_supply(self, supply_id, order_ids):
+            raise WbApiError("Wildberries API вернул 404")
+
+    wb = _FailingMock(client_id=seller.id)
+    with pytest.raises(WbApiError):
+        take_to_work(db, order, wb)
+
+    assert db.scalar(select(func.count()).select_from(Supply).where(Supply.client_id == seller.id)) == 0
+    assert wb.list_supplies()["supplies"] == []
+    db.refresh(order)
+    assert order.status == OrderStatus.NEW and order.supply_id is None
+
+
+def test_delete_supply_only_open_and_empty(db, seller):
+    wb = WBMockClient(client_id=seller.id)
+    empty = create_supply(db, seller, wb)
+    delete_supply(db, empty, wb, actor="tester")
+    assert db.get(Supply, empty.id) is None
+    assert wb.list_supplies()["supplies"] == []
+
+    with_order = create_supply(db, seller, wb)
+    order = Order(client_id=seller.id, wb_order_id="DEL-1", status=OrderStatus.NEW)
+    db.add(order)
+    db.commit()
+    add_order_to_supply(db, with_order, order, wb)
+    with pytest.raises(AppError) as exc_info:
+        delete_supply(db, with_order, wb, actor="tester")
+    assert exc_info.value.reason_code == "supply_not_empty"
+
+    closed = Supply(client_id=seller.id, wb_supply_id="WB-CLOSED", status=SupplyStatus.IN_DELIVERY)
+    db.add(closed)
+    db.commit()
+    with pytest.raises(AppError) as exc_info:
+        delete_supply(db, closed, wb, actor="tester")
+    assert exc_info.value.reason_code == "wrong_status"
+
+
 # --- Счётчики и группы -------------------------------------------------------
 
 
@@ -700,7 +771,7 @@ def test_sync_supplies_imports_foreign_supply_with_our_order(db, seller):
 
     wb = WBMockClient(client_id=seller.id)
     foreign_supply_id = wb.create_supply("Собрана в кабинете WB")
-    wb.add_order_to_supply(foreign_supply_id, "FOREIGN-ORD-1")
+    wb.add_orders_to_supply(foreign_supply_id, ["FOREIGN-ORD-1"])
 
     result = sync_supplies(db, seller, wb)
 
@@ -715,7 +786,7 @@ def test_sync_supplies_ignores_foreign_supply_without_our_orders(db, seller):
     не наша зона интересов (Этап 4, п.4.2)."""
     wb = WBMockClient(client_id=seller.id)
     foreign_supply_id = wb.create_supply("Совсем чужая")
-    wb.add_order_to_supply(foreign_supply_id, "NOT-OUR-ORDER")
+    wb.add_orders_to_supply(foreign_supply_id, ["NOT-OUR-ORDER"])
 
     result = sync_supplies(db, seller, wb)
 
@@ -737,7 +808,7 @@ def test_sync_supplies_does_not_reask_ignored_foreign_supply(db, seller):
 
     wb = _CountingClient(client_id=seller.id)
     foreign_supply_id = wb.create_supply("Совсем чужая")
-    wb.add_order_to_supply(foreign_supply_id, "NOT-OUR-ORDER")
+    wb.add_orders_to_supply(foreign_supply_id, ["NOT-OUR-ORDER"])
 
     sync_supplies(db, seller, wb)
     assert calls["n"] == 1
@@ -777,7 +848,7 @@ def test_sync_supplies_skips_supply_when_orders_endpoint_404s(db, seller):
 
     wb = _BoomOnOrders(client_id=seller.id)
     broken_supply_id = wb.create_supply("Недоступная поставка")
-    wb.add_order_to_supply(broken_supply_id, "SOME-ORDER")
+    wb.add_orders_to_supply(broken_supply_id, ["SOME-ORDER"])
 
     known = create_supply(db, seller, wb)
     wb.close_supply(known.wb_supply_id)  # done=True на стороне WB

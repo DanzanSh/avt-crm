@@ -106,6 +106,14 @@ class OrderItem(Base):
         return self.product.size if self.product is not None else None
 
     @property
+    def product_color(self) -> str | None:
+        return self.product.color if self.product is not None else None
+
+    @property
+    def product_vendor_code(self) -> str | None:
+        return self.product.vendor_code if self.product is not None else None
+
+    @property
     def product_image_url(self) -> str | None:
         return self.product.image_url if self.product is not None else None
 

@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Сборка заказа — Fulfil</title>
+  <title>Сборка — Fulfil</title>
   <link rel="stylesheet" href="/css/theme.css" />
   <script src="/js/core.js"></script>
   <script src="/js/scan-layout.js"></script>
@@ -32,6 +32,15 @@
     .order-id { font-family: var(--mono); font-size: 18px; color: var(--text); }
     #orderPicker .list-card { text-decoration: none; }
     #orderPicker .empty-state a.btn { margin-top: 12px; }
+    .picker-toolbar { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 14px; }
+    .batch-table { width: 100%; border-collapse: collapse; }
+    .batch-table td, .batch-table th { padding: 8px 6px; border-bottom: 1px solid var(--divider); text-align: left; vertical-align: top; }
+    .batch-table .addr { font-family: var(--mono); font-size: 16px; white-space: nowrap; }
+    .batch-table .num { text-align: right; font-size: 18px; font-weight: 700; font-variant-numeric: tabular-nums; }
+    .specs { font-size: 12px; color: var(--muted); }
+    .active-order { border: 2px solid var(--blue); border-radius: var(--radius); padding: 14px; margin-top: 12px; }
+    .active-order img { max-width: 260px; border: 1px solid var(--border); border-radius: var(--radius-sm); }
+    .progress-line { font-size: 15px; color: var(--text-2); margin: 8px 0; }
     .cancelled-banner {
       padding: 14px 16px;
       border-radius: var(--radius);
@@ -49,6 +58,24 @@
 
   <!-- Экран выбора заказа: показывается, когда orderId не задан в query-строке. -->
   <div id="orderPicker" hidden></div>
+
+  <!-- Сводная сборка: один лист на все заказы «на сборке» + раскладка по стикерам. -->
+  <div id="batchView" hidden>
+    <div class="page-sub">
+      1) Соберите товар по сводному листу — одинаковые заказы сложены в одну строку.
+      2) Раскладка: сканируйте товар — система подберёт заказ, покажет его стикер; наклейте и подтвердите.
+    </div>
+    <div class="card section">
+      <h2>Сводный лист подбора</h2>
+      <div id="batchList">Загрузка…</div>
+    </div>
+    <div class="card section">
+      <h2>Раскладка по заказам</h2>
+      <div class="progress-line" id="distProgress"></div>
+      <input class="input" id="distScan" data-scan placeholder="Скан баркода товара…" style="font-family:var(--mono); font-size:20px;" autocomplete="off" />
+      <div id="activeOrder"></div>
+    </div>
+  </div>
 
   <!-- Детали сборки конкретного заказа: показываются только при заданном orderId. -->
   <div id="orderDetails" hidden>
@@ -95,15 +122,6 @@
       in_assembly: ['В сборке', 'badge-orange'],
     };
 
-    // «1 позиция / 2 позиции / 5 позиций» — по образцу fbs/orders.html.
-    function plural(n, one, few, many) {
-      const d10 = n % 10;
-      const d100 = n % 100;
-      if (d10 === 1 && d100 !== 11) return one;
-      if (d10 >= 2 && d10 <= 4 && (d100 < 12 || d100 > 14)) return few;
-      return many;
-    }
-
     async function loadOrder() {
       try {
         order = await Fulfil.api('GET', `/fbs/orders/${orderId}`);
@@ -123,15 +141,39 @@
       }
     }
 
-    // orderId не задан (клик по вкладке меню) — показываем список заказов на сборку.
+    function specsText(parts) {
+      return parts.filter(Boolean).join(' · ');
+    }
+
+    function itemSpecs(it) {
+      return specsText([it.productVendorCode && 'арт. ' + it.productVendorCode, it.productSize, it.productColor]);
+    }
+
+    // orderId не задан (клик по вкладке меню) — список заказов на сборку и вход в сводную сборку.
     async function loadOrderPicker() {
       const el = document.getElementById('orderPicker');
-      el.innerHTML = '<div class="empty-state">Загрузка…</div>';
+      el.innerHTML = `
+        <div class="picker-toolbar">
+          <div id="clientFilterMount"></div>
+          <a class="btn btn-primary" id="btnBatch" href="#">Сводная сборка</a>
+        </div>
+        <div id="pickerList"><div class="empty-state">Загрузка…</div></div>`;
+      await Fulfil.clientFilter.mount(document.getElementById('clientFilterMount'), renderPickerList);
+      document.getElementById('btnBatch').addEventListener('click', (e) => {
+        e.preventDefault();
+        const q = new URLSearchParams({ batch: '1' });
+        if (Fulfil.clientFilter.clientId) q.set('clientId', Fulfil.clientFilter.clientId);
+        location.href = '?' + q.toString();
+      });
+      renderPickerList();
+    }
+
+    async function renderPickerList() {
+      const el = document.getElementById('pickerList');
       try {
-        const orders = await Fulfil.api('GET', '/fbs/orders');
-        const ready = (orders || []).filter(
-          (o) => o.status === 'confirmed' || o.status === 'in_assembly'
-        );
+        const q = new URLSearchParams({ group: 'assembly', limit: '1000' });
+        if (Fulfil.clientFilter.clientId) q.set('client_id', Fulfil.clientFilter.clientId);
+        const ready = await Fulfil.api('GET', '/fbs/orders?' + q.toString());
         if (!ready.length) {
           el.innerHTML =
             '<div class="empty-state">Нет заказов, готовых к сборке. ' +
@@ -140,16 +182,19 @@
           return;
         }
         el.innerHTML =
-          '<div class="page-sub">Выберите заказ для сборки.</div>' +
+          `<div class="page-sub">Заказов на сборке: ${ready.length}. Удобнее собирать их разом — «Сводная сборка»; или откройте один заказ.</div>` +
           ready
             .map((o) => {
               const [label, cls] = PICK_STATUS_LABELS[o.status] || [o.status, 'badge-muted'];
-              const n = o.items.length;
+              const items = o.items
+                .map((it) => `${Fulfil.esc(it.productName || it.barcode)}${itemSpecs(it) ? ' · ' + Fulfil.esc(itemSpecs(it)) : ''} × ${it.qty}`)
+                .join('<br />');
               return `
           <a class="list-card" href="?orderId=${o.id}">
             <div class="order-id">${Fulfil.esc(o.wbOrderId)}</div>
+            <span class="badge badge-muted">${Fulfil.esc(o.clientName || '')}</span>
             <span class="badge ${cls}">${label}</span>
-            <div class="list-card__meta">${n} ${plural(n, 'позиция', 'позиции', 'позиций')}</div>
+            <div class="list-card__meta">${items}</div>
           </a>`;
             })
             .join('');
@@ -157,6 +202,159 @@
         el.innerHTML = `<div class="empty-state">${Fulfil.esc(Fulfil.errorText(err))}</div>`;
       }
     }
+
+    // --- Сводная сборка ------------------------------------------------------
+    // Заказ WB — всегда 1 шт, поэтому собирать «по заказу» = десятки карточек «1 шт».
+    // Сначала один проход по складу по сводному листу, затем раскладка: скан товара →
+    // первый ещё не собранный заказ с этим товаром → его стикер → подтверждение сборки.
+    const batch = { orders: [], done: new Set(), active: null, busy: false };
+
+    async function loadBatch() {
+      const listEl = document.getElementById('batchList');
+      const q = new URLSearchParams();
+      if (params.get('clientId')) q.set('client_id', params.get('clientId'));
+      if (params.get('supplyId')) q.set('supply_id', params.get('supplyId'));
+      try {
+        const res = await Fulfil.api('GET', '/fbs/pick-lists/batch?' + q.toString());
+        batch.orders = res.orders;
+        const problems = res.problems.length
+          ? `<div class="cancelled-banner">Не хватает остатка: ${res.problems
+              .map((p) => Fulfil.esc(p.wbOrderId))
+              .join(', ')} — эти заказы в лист не попали.</div>`
+          : '';
+        const total = res.lines.reduce((acc, l) => acc + l.qty, 0);
+        listEl.innerHTML = res.lines.length
+          ? `${problems}
+            <div class="progress-line">Заказов: ${res.orders.length} · всего к сбору: ${total} шт</div>
+            <table class="batch-table no-mobile-cards">
+              <thead><tr><th>Место</th><th>Товар</th><th class="num">Шт</th></tr></thead>
+              <tbody>${res.lines
+                .map(
+                  (l) => `<tr>
+                    <td class="addr">${Fulfil.esc(l.cellAddress)}</td>
+                    <td>${Fulfil.esc(l.productName)}
+                      <div class="specs">${Fulfil.esc(specsText([l.vendorCode && 'арт. ' + l.vendorCode, l.size, l.color, 'ШК ' + l.barcode]))}</div>
+                    </td>
+                    <td class="num">${l.qty}</td>
+                  </tr>`
+                )
+                .join('')}</tbody>
+            </table>`
+          : problems + '<div class="empty-state">Нет заказов на сборке по выбранному фильтру.</div>';
+        renderDistProgress();
+      } catch (err) {
+        listEl.innerHTML = `<div class="empty-state">${Fulfil.esc(Fulfil.errorText(err))}</div>`;
+      }
+    }
+
+    function renderDistProgress() {
+      document.getElementById('distProgress').textContent =
+        `Разложено ${batch.done.size} из ${batch.orders.length}`;
+    }
+
+    function printSticker(src) {
+      const w = window.open('', '_blank', 'width=420,height=420');
+      if (!w) {
+        Fulfil.toast('Браузер заблокировал окно печати — разрешите всплывающие окна', 'error');
+        return;
+      }
+      w.document.write(`<img src="${src}" style="max-width:100%" />`);
+      w.document.close();
+      const img = w.document.querySelector('img');
+      const go = () => {
+        w.focus();
+        w.print();
+        w.close();
+      };
+      if (img.complete) go();
+      else img.onload = go;
+    }
+
+    async function distributeScan(code) {
+      if (batch.busy) return;
+      if (batch.active) {
+        Fulfil.toast(`Сначала подтвердите заказ ${batch.active.wbOrderId}`, 'error');
+        return;
+      }
+      const order = batch.orders.find(
+        (o) => !batch.done.has(o.id) && o.items.some((it) => it.barcode === code)
+      );
+      if (!order) {
+        const known = batch.orders.some((o) => o.items.some((it) => it.barcode === code));
+        Fulfil.toast(known ? 'Все заказы с этим товаром уже разложены' : 'Этого товара нет в заказах на сборке', 'error');
+        return;
+      }
+      batch.active = order;
+      const it = order.items[0];
+      const box = document.getElementById('activeOrder');
+      box.innerHTML = `
+        <div class="active-order">
+          <div class="order-id">${Fulfil.esc(order.wbOrderId)} <span class="badge badge-muted">${Fulfil.esc(order.clientName || '')}</span></div>
+          <div style="margin:6px 0 10px">${Fulfil.esc(it.productName || it.barcode)}
+            <div class="specs">${Fulfil.esc(itemSpecs(it))}</div></div>
+          <div id="activeSticker">Загружаем стикер…</div>
+          <div class="mark-row" style="margin-top:10px">
+            <input class="input" id="activeMark" placeholder="Код «Честный знак» (если нужен) + Enter" style="font-family:var(--mono)" autocomplete="off" />
+          </div>
+          <div class="mark-list" id="activeMarkList"></div>
+          <div class="picker-toolbar" style="margin-top:10px">
+            <button class="btn btn-primary" id="btnActiveConfirm">Подтвердить сборку</button>
+            <button class="btn" id="btnActiveSkip">Отложить</button>
+          </div>
+        </div>`;
+      try {
+        const sticker = await Fulfil.api('GET', `/fbs/orders/${order.id}/sticker`);
+        const src = `data:image/${sticker.type};base64,${sticker.data}`;
+        document.getElementById('activeSticker').innerHTML =
+          `<img src="${src}" alt="Стикер заказа" /><div style="margin-top:8px"><button class="btn" id="btnActivePrint">Печать стикера</button></div>`;
+        document.getElementById('btnActivePrint').addEventListener('click', () => printSticker(src));
+      } catch (err) {
+        document.getElementById('activeSticker').innerHTML =
+          `<div class="specs">${Fulfil.esc(Fulfil.errorText(err))}</div>`;
+      }
+
+      let marks = 0;
+      document.getElementById('activeMark').addEventListener('keydown', async (e) => {
+        if (e.key !== 'Enter' || !e.target.value) return;
+        const code = e.target.value;
+        e.target.value = '';
+        try {
+          await Fulfil.api('POST', `/fbs/orders/${order.id}/items/${it.id}/scan-mark`, { code });
+          marks += 1;
+          document.getElementById('activeMarkList').textContent = `Отсканировано кодов: ${marks}`;
+        } catch (err) {
+          Fulfil.toast(Fulfil.errorText(err), 'error');
+        }
+      });
+      document.getElementById('btnActiveConfirm').addEventListener('click', async () => {
+        batch.busy = true;
+        try {
+          await Fulfil.api('POST', `/fbs/orders/${order.id}/confirm-assembly`);
+          batch.done.add(order.id);
+          batch.active = null;
+          box.innerHTML = '';
+          Fulfil.toast(`Заказ ${order.wbOrderId} собран`);
+          renderDistProgress();
+          document.getElementById('distScan').focus();
+        } catch (err) {
+          Fulfil.toast(Fulfil.errorText(err), 'error');
+        } finally {
+          batch.busy = false;
+        }
+      });
+      document.getElementById('btnActiveSkip').addEventListener('click', () => {
+        batch.active = null;
+        box.innerHTML = '';
+        document.getElementById('distScan').focus();
+      });
+    }
+
+    document.getElementById('distScan').addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter') return;
+      const code = e.target.value.trim();
+      e.target.value = '';
+      if (code) distributeScan(code);
+    });
 
     async function loadPickList() {
       const el = document.getElementById('pickList');
@@ -219,6 +417,10 @@
       document.getElementById('orderDetails').hidden = false;
       loadOrder();
       loadPickList();
+    } else if (params.get('batch')) {
+      document.querySelector('.page-title').textContent = 'Сводная сборка';
+      document.getElementById('batchView').hidden = false;
+      loadBatch();
     } else {
       document.getElementById('orderPicker').hidden = false;
       loadOrderPicker();

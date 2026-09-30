@@ -242,3 +242,42 @@ def test_stock_list_includes_vendor_code_size_color(db, seller):
 
     [row] = list_stock(client_id=None, db=db)
     assert (row["vendorCode"], row["size"], row["color"]) == ("ART-42", "M", "белый")
+
+
+def _stock_product(db, seller, barcode: str, name: str, qty: int, cell) -> Product:
+    p = Product(client_id=seller.id, barcode=barcode, name=name)
+    db.add(p)
+    db.commit()
+    db.refresh(p)
+    place_stock(db, p, cell, qty)
+    return p
+
+
+def test_transfer_all_available_via_api(api, db, seller, monkeypatch):
+    """«Передать всё свободное на ФБС» — живые товары уходят, архивные нет."""
+    import datetime as dt
+
+    from conftest import auth_headers, make_user
+
+    wb = WBMockClient(client_id=seller.id)
+    monkeypatch.setattr("fulfil.api.v1.stock.get_wb_client", lambda client: wb)
+
+    seller.wb_warehouse_id = "WH-1"
+    db.commit()
+    cells = generate_cells(db, "B", racks=1, cells_per_rack=3)
+    live1 = _stock_product(db, seller, "2000000000024", "Футболка", 5, cells[0])
+    live2 = _stock_product(db, seller, "2000000000031", "Шорты", 3, cells[1])
+    archived = _stock_product(db, seller, "2000000000048", "Архивный", 7, cells[2])
+    archived.archived_at = dt.datetime.now(dt.timezone.utc)
+    db.commit()
+
+    resp = api.post(
+        f"/api/v1/stock/transfer-fbs-all?client_id={seller.id}", headers=auth_headers(make_user(db, "stocker"))
+    )
+    assert resp.status_code == 200, resp.text
+    results = {r["productId"]: r for r in resp.json()}
+    assert set(results) == {live1.id, live2.id}
+    assert all(r["status"] == "sent" for r in results.values()), [r["error"] for r in results.values()]
+    db.refresh(live1)
+    db.refresh(live2)
+    assert (live1.wb_fbs_amount, live2.wb_fbs_amount) == (5, 3)

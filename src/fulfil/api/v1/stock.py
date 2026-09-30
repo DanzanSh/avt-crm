@@ -1,4 +1,5 @@
 import datetime as dt
+import uuid
 
 from fastapi import APIRouter, Depends, Header, Query
 from sqlalchemy import select
@@ -109,14 +110,22 @@ def transfer_all_available_fbs(
     client = clients_service.get_live_client_or_404(db, client_id)
     wb_client = get_wb_client(client)
     summaries = stock_service.list_stock_summaries(db, client_id=client_id)
+    # Только живые товары — как в списке «Остатки» (list_stock): архивный товар с
+    # остатком на полке раньше тоже уходил на WB, хотя на экране его не видно.
+    live_ids = set(
+        db.scalars(select(Product.id).where(Product.client_id == client_id, Product.archived_at.is_(None)))
+    )
+    run_id = uuid.uuid4().hex[:12]
 
     results = []
     for product_id, summary in summaries.items():
         available = summary["availableToTransfer"]
-        if available <= 0:
+        if available <= 0 or product_id not in live_ids:
             continue
         product = _get_product(db, product_id)
-        idempotency_key = f"transfer-all-{product_id}-{int(dt.datetime.now().timestamp())}"
+        # uuid запуска вместо секундной метки: два нажатия в одну секунду не
+        # склеиваются в одну передачу, повтор внутри запуска — по-прежнему нет.
+        idempotency_key = f"transfer-all-{run_id}-{product_id}"
         try:
             transfer = stock_service.transfer_to_fbs(db, product, available, idempotency_key, wb_client)
             results.append(

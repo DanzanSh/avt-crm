@@ -38,6 +38,9 @@ class ClientUpdateRequest(CamelModel):
     api_key: str | None = None
     wb_warehouse_id: str | None = None
     wb_warehouse_name: str | None = None
+    # Подтверждение смены склада при активных заказах на других складах —
+    # фронт шлёт true после 409 client_has_active_orders.
+    force: bool = False
 
 
 class SetWbWarehouseRequest(CamelModel):
@@ -46,8 +49,14 @@ class SetWbWarehouseRequest(CamelModel):
 
     warehouse_id: str
     warehouse_name: str
+    # Подтверждение смены склада при активных заказах на других складах —
+    # фронт шлёт true после 409 client_has_active_orders.
+    force: bool = False
 
 
 class CreateWbWarehouseRequest(CamelModel):
     name: str
     office_id: int
+    # Подтверждение смены склада при активных заказах на других складах —
+    # фронт шлёт true после 409 client_has_active_orders.
+    force: bool = False

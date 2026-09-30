@@ -7,6 +7,7 @@
 """
 
 import datetime as dt
+import logging
 
 from sqlalchemy import case, delete, func, select
 from sqlalchemy.exc import IntegrityError
@@ -24,6 +25,8 @@ from fulfil.services import supplies as supplies_service
 from fulfil.services.clients import list_syncable_clients
 from fulfil.services.products import sync_products_from_wb
 from fulfil.services.stock_ledger import apply_move
+
+logger = logging.getLogger(__name__)
 
 # Заказы, чей исход на WB ещё не известен — опрашиваются статусом отдельно от
 # /orders/new (Этап 3, п.3.1): без этого отмена покупателем, «в доставке» и
@@ -348,24 +351,15 @@ def sync_orders(db: Session) -> list[dict]:
         results.append(sync_client_orders(db, client, wb_client))
     return results
 
-def _find_or_create_open_supply(db: Session, client: Client, wb_client: WBClient) -> Supply:
-    supply = db.scalar(
+def _find_open_supply(db: Session, client: Client) -> Supply | None:
+    return db.scalar(
         select(Supply)
         .where(Supply.client_id == client.id, Supply.status == SupplyStatus.OPEN)
         .order_by(Supply.id.desc())
     )
-    if supply is not None:
-        return supply
-    name = f"{client.name} {dt.date.today().isoformat()}"
-    return supplies_service.create_supply(db, client, wb_client, name=name)
 
 
-def take_to_work(db: Session, order: Order, wb_client: WBClient) -> Order:
-    """Необратимо: подтверждает заказ на WB, добавляя его в поставку клиента
-    (Этап 3, п.3.2 — problems.txt №3: раньше take_to_work никогда не обращался
-    к WB, и в модели WB заказ попадает «на сборку» только после добавления
-    в поставку). Обратной операции у WB нет — предупреждение показывается
-    фронтом до вызова, не здесь."""
+def _check_can_take_to_work(order: Order) -> None:
     if order.status != OrderStatus.NEW:
         raise AppError(
             f'Заказ в статусе "{order.status.value}" нельзя взять в работу.',
@@ -379,30 +373,77 @@ def take_to_work(db: Session, order: Order, wb_client: WBClient) -> Order:
             status_code=409,
             reason_code="order_has_problem",
         )
-    supply = _find_or_create_open_supply(db, order.client, wb_client)
-    supplies_service.add_order_to_supply(db, supply, order, wb_client)
+
+
+def _take_orders_to_work(db: Session, client: Client, orders: list[Order], wb_client: WBClient) -> None:
+    """Все заказы одного клиента — в его открытую поставку одним вызовом WB.
+    Поставка, созданная здесь же, коммитится только вместе с заказами: если WB
+    не принял заказы, она удаляется и в WB (best-effort), и локально — иначе
+    оставалась пустая поставка, в которую потом безуспешно лезли все заказы."""
+    supply = _find_open_supply(db, client)
+    created = supply is None
+    if created:
+        name = f"{client.name} {dt.date.today().isoformat()}"
+        supply = supplies_service.create_supply(db, client, wb_client, name=name, commit=False)
+    wb_supply_id = supply.wb_supply_id
+    try:
+        supplies_service.add_orders_to_supply(db, supply, orders, wb_client)
+    except AppError:
+        db.rollback()
+        if created and wb_supply_id:
+            try:
+                wb_client.delete_supply(wb_supply_id)
+            except AppError:
+                logger.warning("Не удалось удалить пустую поставку %s после сбоя добавления заказов", wb_supply_id)
+        raise
+
+
+def take_to_work(db: Session, order: Order, wb_client: WBClient) -> Order:
+    """Необратимо: подтверждает заказ на WB, добавляя его в поставку клиента
+    (Этап 3, п.3.2 — problems.txt №3: раньше take_to_work никогда не обращался
+    к WB, и в модели WB заказ попадает «на сборку» только после добавления
+    в поставку). Обратной операции у WB нет — предупреждение показывается
+    фронтом до вызова, не здесь."""
+    _check_can_take_to_work(order)
+    _take_orders_to_work(db, order.client, [order], wb_client)
     db.refresh(order)
     return order
 
 
 def take_to_work_bulk(db: Session, order_ids: list[int]) -> list[dict]:
-    """Массовое «Взять в работу выбранные» (Этап 3, п.3.2) — одна поставка на
-    каждого клиента: find_or_create_open_supply находит уже созданную в этом
-    же вызове поставку для повторного клиента, а не плодит новую на каждый заказ."""
-    results = []
+    """Массовое «Взять в работу выбранные» (Этап 3, п.3.2) — одна поставка и
+    один вызов WB на каждого клиента. Непригодный заказ (не NEW, проблема)
+    отсеивается отдельно и не мешает остальным; сбой WB — на всю группу клиента."""
+    errors: dict[int, str | None] = {}
+    by_client: dict[int, list[Order]] = {}
+    order_ids = list(dict.fromkeys(order_ids))
     for order_id in order_ids:
         order = db.get(Order, order_id)
         if order is None:
-            results.append({"orderId": order_id, "ok": False, "error": f"Заказ #{order_id} не найден."})
+            errors[order_id] = f"Заказ #{order_id} не найден."
             continue
         try:
-            wb_client = get_wb_client(order.client)
-            take_to_work(db, order, wb_client)
-            results.append({"orderId": order_id, "ok": True, "error": None})
+            _check_can_take_to_work(order)
+        except AppError as exc:
+            errors[order_id] = exc.detail
+            continue
+        by_client.setdefault(order.client_id, []).append(order)
+
+    for orders in by_client.values():
+        ids = [o.id for o in orders]
+        client = orders[0].client
+        try:
+            wb_client = get_wb_client(client)
+            _take_orders_to_work(db, client, orders, wb_client)
+            errors.update({oid: None for oid in ids})
         except AppError as exc:
             db.rollback()
-            results.append({"orderId": order_id, "ok": False, "error": exc.detail})
-    return results
+            errors.update({oid: exc.detail for oid in ids})
+
+    return [
+        {"orderId": oid, "ok": errors.get(oid) is None, "error": errors.get(oid)}
+        for oid in order_ids
+    ]
 
 
 def list_orders(

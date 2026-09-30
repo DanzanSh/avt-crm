@@ -150,14 +150,18 @@
     .cell-contents .num, .cell-receipts .num { text-align: right; font-variant-numeric: tabular-nums; }
     .cell-empty-row { color: var(--muted); }
 
-    /* Допустимые баркоды места — чипы с крестиком удаления (problems.txt, п.1). */
-    .allowed-list { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0; }
-    .allowed-chip { font-family: var(--mono); font-size: 12px; display: inline-flex; align-items: center; gap: 4px; }
-    .allowed-chip button {
-      border: 0; background: none; color: inherit; cursor: pointer;
-      font-size: 14px; line-height: 1; padding: 0 2px; opacity: .6;
+    /* Допустимые баркоды места — баркод + расшифровка в товар и крестик удаления (problems.txt, п.1). */
+    .allowed-list { display: flex; flex-direction: column; gap: 6px; margin: 6px 0; }
+    .allowed-item {
+      display: flex; align-items: flex-start; gap: 8px; padding: 6px 8px;
+      border: 1px solid var(--border); border-radius: 6px; font-size: 13px;
     }
-    .allowed-chip button:hover { opacity: 1; }
+    .allowed-item__body { flex: 1; min-width: 0; }
+    .allowed-item button {
+      border: 0; background: none; color: inherit; cursor: pointer;
+      font-size: 16px; line-height: 1; padding: 0 2px; opacity: .6;
+    }
+    .allowed-item button:hover { opacity: 1; }
   </style>
 </head>
 <body>
@@ -951,6 +955,20 @@
       return `${p(d.getDate())}.${p(d.getMonth() + 1)} ${p(d.getHours())}:${p(d.getMinutes())}`;
     }
 
+    // «арт. X · M · чёрный · ШК … · Клиент» — название WB часто не различает
+    // размер/цвет, а одинаковый товар бывает у разных клиентов.
+    function productSpecs(p, { withBarcode = true, withClient = true } = {}) {
+      const parts = [];
+      if (p.vendorCode) parts.push('арт. ' + p.vendorCode);
+      if (p.size) parts.push(p.size);
+      if (p.color) parts.push(p.color);
+      if (withBarcode && p.barcode) parts.push('ШК ' + p.barcode);
+      if (withClient && p.clientName) parts.push(p.clientName);
+      return parts.length
+        ? `<div style="color:var(--muted); font-size:12px;">${Fulfil.esc(parts.join(' · '))}</div>`
+        : '';
+    }
+
     function renderCellDetail(cell) {
       const body = document.getElementById('detailModalBody');
 
@@ -961,7 +979,7 @@
             .map(
               (p) => `
               <tr>
-                <td>${Fulfil.esc(p.productName)}</td>
+                <td>${Fulfil.esc(p.productName)}${productSpecs(p)}</td>
                 <td class="num">${p.qty}</td>
               </tr>`
             )
@@ -979,7 +997,7 @@
                 (r) => `
               <tr>
                 <td style="white-space:nowrap; color:var(--muted);">${Fulfil.esc(fmtReceiptDate(r.createdAt))}</td>
-                <td>${Fulfil.esc(r.productName)}</td>
+                <td>${Fulfil.esc(r.productName)}${productSpecs(r, { withBarcode: false, withClient: false })}</td>
                 <td class="num">${r.qty}</td>
               </tr>`
               )
@@ -999,10 +1017,22 @@
         <div style="margin-top:12px; font-weight:600;">Допустимые баркоды</div>
         <div id="allowedList" class="allowed-list">
           ${
-            cell.allowedBarcodes.length
-              ? cell.allowedBarcodes
+            (cell.allowedBarcodeDetails || []).length
+              ? cell.allowedBarcodeDetails
                   .map(
-                    (b) => `<span class="badge badge-blue allowed-chip">${Fulfil.esc(b)}<button type="button" data-role="allowed-remove" data-barcode="${Fulfil.esc(b)}" title="Убрать из допуска" aria-label="Убрать ${Fulfil.esc(b)} из допуска">×</button></span>`
+                    (a) => `<div class="allowed-item">
+                      <div class="allowed-item__body">
+                        <div style="font-family:var(--mono);">${Fulfil.esc(a.barcode)}</div>
+                        ${
+                          a.products.length
+                            ? a.products
+                                .map((p) => `<div>${Fulfil.esc(p.productName)}${productSpecs(p, { withBarcode: false })}</div>`)
+                                .join('')
+                            : '<div style="color:var(--muted); font-size:12px;">товар не найден в каталоге</div>'
+                        }
+                      </div>
+                      <button type="button" data-role="allowed-remove" data-barcode="${Fulfil.esc(a.barcode)}" title="Убрать из допуска" aria-label="Убрать ${Fulfil.esc(a.barcode)} из допуска">×</button>
+                    </div>`
                   )
                   .join('')
               : '<span style="color:var(--muted); font-size:12px;">любой товар (допуск не настроен)</span>'

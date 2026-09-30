@@ -182,7 +182,8 @@ def scan_place(
     user: dict = Depends(get_current_user),
     x_idempotency_key: str | None = Header(default=None),
 ) -> dict:
-    """Скан баркода товара -> количество -> скан ячейки, внутри конкретной приёмки.
+    """Размещение по скану внутри конкретной приёмки: фронт сканирует короб
+    (ячейку), затем товар поштучно — каждый скан шлёт qty=1.
     Товар ищется только среди товаров клиента этой приёмки (resolve_scan client_id).
 
     X-Idempotency-Key — повтор с тем же ключом (обрыв сети, двойной скан) не удваивает
@@ -198,7 +199,7 @@ def scan_place(
     cell = resolve_location(db, body.cell_code)
 
     line = receiving_service.add_receipt_line(
-        db, receipt, product, cell, body.qty, actor=_actor(user)
+        db, receipt, product, cell, body.qty, actor=_actor(user), merge_with_last=True
     )
 
     result = {
@@ -206,14 +207,30 @@ def scan_place(
         "lineId": line.id,
         "receiptNumber": receipt.number,
         "cellAddress": cell.address,
+        "productId": product.id,
         "productName": product.name,
         "barcode": product.barcode,
+        "vendorCode": product.vendor_code,
+        "size": product.size,
+        "color": product.color,
+        "addedQty": body.qty,
+        # Итог строки: подряд идущие сканы одного товара в одно место копятся в ней.
         "qty": line.qty,
         "actor": line.actor,
         "createdAt": line.created_at.isoformat() if line.created_at else None,
     }
     idempotency.complete_idempotent(db, _SCAN_ENDPOINT, x_idempotency_key, result)
     return result
+
+
+@router.post("/{receipt_id}/lines/{line_id}/undo-scan")
+def undo_scan(
+    receipt_id: int, line_id: int, db: Session = Depends(get_db), user: dict = Depends(get_current_user),
+) -> dict:
+    """«Отменить последний скан» — минус 1 шт со строки и с остатка места."""
+    receipt = _get_receipt(db, receipt_id)
+    line = receiving_service.undo_receipt_scan(db, receipt, line_id, actor=_actor(user))
+    return {"ok": True, "lineId": line_id, "qty": line.qty if line is not None else 0}
 
 
 @router.post("/{receipt_id}/accept-manual", response_model=ProgressOut)
