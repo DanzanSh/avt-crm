@@ -532,13 +532,18 @@ def delete_cell(db: Session, cell: Cell, actor: str) -> None:
     db.commit()
 
 
+_INT4_MAX = 2**31 - 1
+
+
 def resolve_location(db: Session, raw: str) -> Cell:
     """Принимает id / 'CELL-000123' / адрес 'A-1-10' — сам определяет, что перед ним.
     Один парсер на весь проект: клиент шлёт отсканированную строку как есть,
     не классифицируя её (см. DEV-PLAN.md, приём mobile-putaway.html). Адрес,
     введённый кириллицей в русской раскладке, распознаётся через normalize_homoglyphs."""
     raw = raw.strip()
-    if raw.isdigit():
+    # id — int4: длинный числовой код (13-значный ШК товара) в запрос не подставляем,
+    # иначе Postgres отвечает «integer out of range» и скан падает 500.
+    if raw.isdigit() and int(raw) <= _INT4_MAX:
         cell = db.scalar(select(Cell).where(Cell.id == int(raw), Cell.deleted_at.is_(None)))
         if cell:
             return cell

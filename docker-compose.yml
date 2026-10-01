@@ -11,20 +11,20 @@
 #
 # Переменные задаются в панели App Platform (шаг «Настройка приложения»),
 # а не через .env — файл .env в репозиторий не коммитится:
-#   POSTGRES_PASSWORD=<pass>
-#   DATABASE_URL=postgresql+psycopg://fulfil:<pass>@db:5432/fulfil
+#   DATABASE_URL=postgresql+psycopg://<user>:<pass>@<host>:5432/<db>
+#       (адрес управляемой БД Timeweb Cloud: сервиса `db` в этом файле нет,
+#        Postgres в контейнере без `volumes` терял бы данные при каждом редеплое)
 #   ADMIN_LOGIN=... / ADMIN_PASSWORD=...
 #   JWT_SECRET=...                        # openssl rand -hex 32
-#   WB_MODE / WB_API_TOKEN / WB_WAREHOUSE_ID — опционально, см. .env.example
+#   WB_MODE=http — на проде обязательно: по умолчанию стоит mock, заказы с WB
+#       при нём не подтягиваются;
+#   WB_API_TOKEN / WB_WAREHOUSE_ID — опционально, см. .env.example
 
 services:
   # Первый сервис — его платформа вешает на основной домен приложения.
   app:
     build: .
     restart: unless-stopped
-    depends_on:
-      db:
-        condition: service_healthy
     environment:
       DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in App Platform variables}
       ADMIN_LOGIN: ${ADMIN_LOGIN:?set ADMIN_LOGIN in App Platform variables}

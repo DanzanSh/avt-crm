@@ -46,6 +46,26 @@ def test_resolve_scan_not_found(db):
         resolve_scan(db, "totally-unknown-code")
 
 
+def test_resolve_scan_long_numeric_unknown_code_is_not_found(db):
+    # 13-значный ШК не должен трактоваться как id ячейки: на Postgres int4 даёт
+    # «integer out of range» → 500. SQLite (тесты) этого не ловит, поэтому смотрим
+    # на параметры запросов.
+    from sqlalchemy import event
+
+    seen: list = []
+
+    def spy(conn, cursor, statement, parameters, context, executemany):
+        seen.extend(parameters if isinstance(parameters, (tuple, list)) else parameters.values())
+
+    event.listen(db.get_bind(), "before_cursor_execute", spy)
+    try:
+        with pytest.raises(NotFoundError):
+            resolve_scan(db, "9999999999999")
+    finally:
+        event.remove(db.get_bind(), "before_cursor_execute", spy)
+    assert not [v for v in seen if isinstance(v, int) and v > 2**31 - 1]
+
+
 def test_resolve_scan_ambiguous_when_raw_and_fixed_both_exist_as_different_entities(db, seller):
     """Guard неоднозначности (DEV-PLAN.md, placement-items.html): если сырой код и код
     после исправления раскладки существуют и указывают на разные сущности — отказ,
