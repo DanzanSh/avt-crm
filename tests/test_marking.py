@@ -115,3 +115,51 @@ def test_confirm_assembly_without_marks_commits_stock_and_packs(db, seller):
     order, item = _make_order_with_stock(db, seller, qty=3)
     result = confirm_assembly(db, order, WBMockClient(client_id=seller.id))
     assert result.status == OrderStatus.PACKED
+
+
+def test_confirm_assembly_retry_after_wb_error_does_not_double_write_off(db, seller):
+    """WB отклонил марки (например, 405) уже после списания остатка — повторное
+    подтверждение только досылает марки и не списывает остаток второй раз."""
+    from fulfil.errors import WbApiError
+    from fulfil.integrations.wb.mock import WBMockClient
+    from fulfil.models.stock import StockByCell
+    from sqlalchemy import select
+
+    order, item = _make_order_with_stock(db, seller, qty=1)
+    # Второй товар на складе, чтобы повторное списание было видно по остатку.
+    row = db.scalar(select(StockByCell).where(StockByCell.product_id == item.product_id))
+    row.qty = 2
+    db.commit()
+    scan_mark(db, item, "\x1d01046012345678909721retry\x1d91EE00")
+
+    class _FailingWb(WBMockClient):
+        def send_marking_codes(self, order_id, codes):
+            raise WbApiError("405 Method Not Allowed")
+
+    with pytest.raises(WbApiError):
+        confirm_assembly(db, order, _FailingWb(client_id=seller.id))
+    db.refresh(row)
+    assert row.qty == 1
+
+    result = confirm_assembly(db, order, WBMockClient(client_id=seller.id))
+    assert result.status == OrderStatus.PACKED
+    db.refresh(row)
+    assert row.qty == 1
+
+
+def test_scan_mark_latinizes_russian_layout(db, seller):
+    """Сканер в русской раскладке: буквы и символы криптохвоста возвращаются в латиницу
+    по позиции клавиши, GS-разделитель не трогается."""
+    item, _ = _make_order_item(db, seller)
+    typed = "\x1d0104601234567890215Фи\"№;Ж\x1d93ЙЦ.,"
+
+    mark = scan_mark(db, item, typed)
+
+    assert mark.mark_code == "\x1d0104601234567890215Ab@#$:\x1d93QW/?"
+
+
+def test_latinize_mark_keeps_latin_code_verbatim():
+    from fulfil.services.marking import latinize_mark
+
+    code = '\x1d0104601234567890215ab;:"?.,/\x1d93XyZ'
+    assert latinize_mark(code) == code

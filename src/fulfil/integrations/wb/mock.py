@@ -207,6 +207,12 @@ class WBMockClient:
 
     def add_orders_to_supply(self, supply_id: str, order_ids: list[str]) -> dict:
         self._supplies.setdefault(supply_id, self._blank_supply())
+        # Как в WB: заказ, уже лежащий в другой открытой поставке, переносится,
+        # а не дублируется в двух поставках.
+        moved = set(order_ids)
+        for other_id, other in self._supplies.items():
+            if other_id != supply_id:
+                other["orders"] = [o for o in other["orders"] if o not in moved]
         self._supplies[supply_id]["orders"].extend(order_ids)
         return {"ok": True}
 

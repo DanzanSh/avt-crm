@@ -100,7 +100,7 @@
       <h2>Код маркировки «Честный знак»</h2>
       <div class="mark-row">
         <select class="input" id="itemSelect" style="max-width:260px"></select>
-        <input class="input" id="markInput" data-scan placeholder="Скан кода…" style="font-family:var(--mono)" />
+        <input class="input" id="markInput" data-scan="mark" placeholder="Скан кода…" style="font-family:var(--mono)" />
       </div>
       <div class="mark-list" id="markList"></div>
     </div>
@@ -276,16 +276,19 @@
         Fulfil.toast(`Сначала подтвердите заказ ${batch.active.wbOrderId}`, 'error');
         return;
       }
+      // Товар можно отсканировать по любому баркоду карточки, а не только по тому,
+      // что пришёл в заказе WB (маркировка бывает наклеена по другому баркоду).
+      const matches = (it) => (it.barcodes && it.barcodes.length ? it.barcodes : [it.barcode]).includes(code);
       const order = batch.orders.find(
-        (o) => !batch.done.has(o.id) && o.items.some((it) => it.barcode === code)
+        (o) => !batch.done.has(o.id) && o.items.some(matches)
       );
       if (!order) {
-        const known = batch.orders.some((o) => o.items.some((it) => it.barcode === code));
+        const known = batch.orders.some((o) => o.items.some(matches));
         Fulfil.toast(known ? 'Все заказы с этим товаром уже разложены' : 'Этого товара нет в заказах на сборке', 'error');
         return;
       }
       batch.active = order;
-      const it = order.items[0];
+      const it = order.items.find(matches) || order.items[0];
       const box = document.getElementById('activeOrder');
       box.innerHTML = `
         <div class="active-order">
@@ -294,7 +297,7 @@
             <div class="specs">${Fulfil.esc(itemSpecs(it))}</div></div>
           <div id="activeSticker">Загружаем стикер…</div>
           <div class="mark-row" style="margin-top:10px">
-            <input class="input" id="activeMark" placeholder="Код «Честный знак» (если нужен) + Enter" style="font-family:var(--mono)" autocomplete="off" />
+            <input class="input" id="activeMark" data-scan="mark" placeholder="Код «Честный знак» (если нужен) + Enter" style="font-family:var(--mono)" autocomplete="off" />
           </div>
           <div class="mark-list" id="activeMarkList"></div>
           <div class="picker-toolbar" style="margin-top:10px">

@@ -111,7 +111,12 @@ def commit_pick_lines(db: Session, order: Order, actor: str = "system") -> None:
     что и передача марок в WB (services.marking.confirm_assembly). Списание идёт через
     apply_move(), поэтому статус опустошённой ячейки корректно возвращается в free
     (FEATURES-PLAN.md, дефект №1 — раньше ячейка навсегда оставалась occupied)."""
-    lines = db.scalars(select(PickLine).where(PickLine.order_id == order.id)).all()
+    # Уже списанные строки пропускаем: confirm_assembly коммитит списание ДО отправки
+    # марок в WB, и если WB ответил ошибкой, повторное подтверждение не должно
+    # списать тот же остаток второй раз.
+    lines = db.scalars(
+        select(PickLine).where(PickLine.order_id == order.id, PickLine.picked_at.is_(None))
+    ).all()
     for line in lines:
         row = db.scalar(
             select(StockByCell).where(

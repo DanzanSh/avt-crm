@@ -91,6 +91,7 @@ def add_orders_to_supply(db: Session, supply: Supply, orders: list[Order], wb_cl
     wb_client.add_orders_to_supply(supply.wb_supply_id, [o.wb_order_id for o in orders])
     for order in orders:
         order.supply_id = supply.id
+        order.wb_supply_id = supply.wb_supply_id
         if order.status == OrderStatus.NEW:
             # Добавление в поставку — это и есть подтверждение заказа на WB (Этап 3,
             # п.3.2, problems.txt №3): подтверждённый заказ идёт в сборку
@@ -101,6 +102,81 @@ def add_orders_to_supply(db: Session, supply: Supply, orders: list[Order], wb_cl
 
 def add_order_to_supply(db: Session, supply: Supply, order: Order, wb_client: WBClient) -> None:
     add_orders_to_supply(db, supply, [order], wb_client)
+
+
+# Перенести можно заказ, который WB ещё держит в статусе confirm: подтверждён, но
+# поставка не передана в доставку. Собранный (PACKED) тоже — срочно отгружают как
+# раз уже собранные заказы.
+_MOVABLE_ORDER_STATUSES = (OrderStatus.CONFIRMED, OrderStatus.IN_ASSEMBLY, OrderStatus.PACKED)
+
+
+def move_orders_to_supply(
+    db: Session, order_ids: list[int], *, target_supply_id: int | None = None,
+    wb_client: WBClient | None = None,
+) -> Supply:
+    """Перенос заказов в отдельную поставку — например, самых старых, чтобы
+    отгрузить их раньше и не получить штраф WB за позднюю отгрузку.
+    target_supply_id=None — создаётся новая поставка; она коммитится только вместе
+    с заказами, а при отказе WB удаляется (как в «Взять в работу»)."""
+    order_ids = list(dict.fromkeys(order_ids))
+    if not order_ids:
+        raise AppError("Не выбрано ни одного заказа.", status_code=400, reason_code="no_orders")
+    orders = list(db.scalars(select(Order).where(Order.id.in_(order_ids))))
+    missing = set(order_ids) - {o.id for o in orders}
+    if missing:
+        raise AppError(
+            f"Заказы не найдены: {', '.join(f'#{i}' for i in sorted(missing))}.",
+            status_code=404, reason_code="not_found",
+        )
+    if len({o.client_id for o in orders}) > 1:
+        raise AppError(
+            "Выбраны заказы разных клиентов — переносить можно только заказы одного клиента.",
+            status_code=409, reason_code="client_mismatch",
+        )
+    for order in orders:
+        if order.status not in _MOVABLE_ORDER_STATUSES or order.supplier_status in ("complete", "cancel"):
+            raise AppError(
+                f'Заказ {order.wb_order_id} в статусе "{order.status.value}" — перенести нельзя.',
+                status_code=409, reason_code="wrong_status",
+            )
+        source = db.get(Supply, order.supply_id) if order.supply_id else None
+        if source is not None and source.status != SupplyStatus.OPEN:
+            raise AppError(
+                f"Заказ {order.wb_order_id} в поставке, уже переданной в доставку — перенести нельзя.",
+                status_code=409, reason_code="wrong_status",
+            )
+
+    client = orders[0].client
+    if wb_client is None:
+        wb_client = get_wb_client(client)
+
+    created = target_supply_id is None
+    if created:
+        name = f"{client.name} {dt.date.today().isoformat()} срочная"
+        target = create_supply(db, client, wb_client, name=name, commit=False)
+    else:
+        target = db.get(Supply, target_supply_id)
+        if target is None:
+            raise AppError(f"Поставка #{target_supply_id} не найдена.", status_code=404, reason_code="not_found")
+        orders = [o for o in orders if o.supply_id != target.id]
+        if not orders:
+            raise AppError(
+                "Выбранные заказы уже в этой поставке.", status_code=409, reason_code="already_in_supply"
+            )
+
+    wb_supply_id = target.wb_supply_id
+    try:
+        add_orders_to_supply(db, target, orders, wb_client)
+    except AppError:
+        db.rollback()
+        if created and wb_supply_id:
+            try:
+                wb_client.delete_supply(wb_supply_id)
+            except AppError:
+                logger.warning("Не удалось удалить пустую поставку %s после сбоя переноса заказов", wb_supply_id)
+        raise
+    db.refresh(target)
+    return target
 
 
 def delete_supply(db: Session, supply: Supply, wb_client: WBClient, *, actor: str) -> None:

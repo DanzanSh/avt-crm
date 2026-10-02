@@ -400,8 +400,42 @@
     },
   };
 
+  /* Возраст заказа WB («как давно получен», как в ЛК WB). За позднюю отгрузку FBS
+   * WB штрафует, поэтому старые заказы подсвечиваются. Пороги — в часах. */
+  const ORDER_AGE_WARN_HOURS = 24;
+  const ORDER_AGE_ALERT_HOURS = 48;
+
+  function orderAgeParts(iso) {
+    const created = new Date(iso);
+    if (!iso || isNaN(created)) return null;
+    const mins = Math.max(0, Math.floor((Date.now() - created.getTime()) / 60000));
+    const d = Math.floor(mins / 1440);
+    const h = Math.floor((mins % 1440) / 60);
+    const m = mins % 60;
+    const text = d ? `${d} д ${h} ч назад` : h ? `${h} ч ${m} мин назад` : `${m} мин назад`;
+    const hours = mins / 60;
+    const cls = hours >= ORDER_AGE_ALERT_HOURS ? 'badge-red' : hours >= ORDER_AGE_WARN_HOURS ? 'badge-orange' : 'badge-muted';
+    return { text, cls, title: 'Получен ' + created.toLocaleString('ru-RU') };
+  }
+
+  /** Бейдж «N ч назад»; пересчитывается раз в минуту без запроса к серверу. */
+  function orderAgeHtml(iso) {
+    const p = orderAgeParts(iso);
+    if (!p) return '';
+    return `<span class="badge ${p.cls} order-age" data-created="${esc(iso)}" title="${esc(p.title)}">${esc(p.text)}</span>`;
+  }
+
+  setInterval(() => {
+    document.querySelectorAll('.order-age[data-created]').forEach((el) => {
+      const p = orderAgeParts(el.dataset.created);
+      if (!p) return;
+      el.textContent = p.text;
+      el.className = `badge ${p.cls} order-age`;
+    });
+  }, 60000);
+
   window.Fulfil = {
     api, getToken, setToken, logout, decodeJwt, esc, toast, errorText, requireAuth, newIdempotencyKey, thumb,
-    plural, formModal, confirmModal, clientFilter, me, ROLE_LABELS,
+    plural, formModal, confirmModal, clientFilter, me, ROLE_LABELS, orderAgeHtml,
   };
 })();

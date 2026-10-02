@@ -1,3 +1,5 @@
+from typing import Literal
+
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -11,6 +13,7 @@ from fulfil.models.fbs import Order, OrderItem, OrderStatus, Supply
 from fulfil.schemas.fbs import (
     CreateBoxesRequest,
     CreateSupplyRequest,
+    MoveOrdersRequest,
     OrderCountersOut,
     OrderOut,
     PickLineOut,
@@ -51,12 +54,14 @@ def sync_orders(client_id: int | None = None, db: Session = Depends(get_db)) -> 
 @router.get("/orders", response_model=list[OrderOut])
 def list_orders(
     client_id: int | None = None, warehouse_id: str | None = None, group: str | None = None,
+    sort: Literal["oldest", "newest"] | None = None,
     limit: int = Query(default=100, ge=1, le=1000),  # P3: раньше без верхней границы
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
 ) -> list[Order]:
     return orders_service.list_orders(
-        db, client_id=client_id, warehouse_id=warehouse_id, group=group, limit=limit, offset=offset,
+        db, client_id=client_id, warehouse_id=warehouse_id, group=group, sort=sort,
+        limit=limit, offset=offset,
     )
 
 
@@ -82,7 +87,7 @@ def take_to_work(order_id: int, db: Session = Depends(get_db)) -> Order:
 def take_to_work_bulk(body: TakeToWorkBulkRequest, db: Session = Depends(get_db)) -> list[dict]:
     """Массовое «Взять в работу выбранные» — одна поставка на каждого клиента
     (Этап 3, п.3.2). Ошибка одного заказа не останавливает остальные."""
-    return orders_service.take_to_work_bulk(db, body.order_ids)
+    return orders_service.take_to_work_bulk(db, body.order_ids, new_supply=body.new_supply)
 
 
 @router.get("/orders/{order_id}/pick-list", response_model=list[PickLineOut])
@@ -207,6 +212,13 @@ def _get_supply(db: Session, supply_id: int) -> Supply:
     if supply is None:
         raise NotFoundError(f"Поставка #{supply_id} не найдена.")
     return supply
+
+
+@router.post("/supplies/move-orders", response_model=SupplyOut)
+def move_orders(body: MoveOrdersRequest, db: Session = Depends(get_db)) -> Supply:
+    """Перенос заказов в новую (targetSupplyId=null) или другую открытую поставку
+    того же клиента — чтобы отгрузить срочные заказы отдельно."""
+    return supplies_service.move_orders_to_supply(db, body.order_ids, target_supply_id=body.target_supply_id)
 
 
 @router.post("/supplies/{supply_id}/orders/{order_id}")

@@ -282,3 +282,23 @@ def test_ping_checks_both_hosts(monkeypatch):
     assert result["marketplace"]["ok"] is True
     assert result["content"]["ok"] is True
     assert set(seen_bases) == {client._base, client._content_base}
+
+
+def test_send_marking_codes_uses_put(monkeypatch):
+    """Регресс: марки ЧЗ отправлялись POST-ом — WB отвечал 405 Method Not Allowed."""
+    client = WBHttpClient("test-token")
+    seen = {}
+
+    def _fake_request(method, path, *, base=None, json=None, **kw):
+        seen.update(method=method, path=path, json=json)
+        return httpx.Response(204)
+
+    monkeypatch.setattr(client, "_request", _fake_request)
+    result = client.send_marking_codes("123", ["0104600000000000215abc\x1d93dGVz"])
+
+    assert seen == {
+        "method": "PUT",
+        "path": "/api/v3/orders/123/meta/sgtin",
+        "json": {"sgtins": ["0104600000000000215abc\x1d93dGVz"]},
+    }
+    assert result == {"ok": True}

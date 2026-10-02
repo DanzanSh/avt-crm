@@ -347,8 +347,9 @@ class WBHttpClient:
         return {"type": "png", "data": first.get("file", "")}
 
     def send_marking_codes(self, order_id: str, codes: list[str]) -> dict:
+        # Метод именно PUT: на POST WB отвечает 405 Method Not Allowed.
         resp = self._request(
-            "POST", f"/api/v3/orders/{order_id}/meta/sgtin", json={"sgtins": codes}
+            "PUT", f"/api/v3/orders/{order_id}/meta/sgtin", json={"sgtins": codes}
         )
         return {"ok": resp.status_code < 300}
 

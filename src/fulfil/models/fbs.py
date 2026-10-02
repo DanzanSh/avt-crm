@@ -117,6 +117,17 @@ class OrderItem(Base):
     def product_image_url(self) -> str | None:
         return self.product.image_url if self.product is not None else None
 
+    @property
+    def barcodes(self) -> list[str]:
+        """Все баркоды, по которым позицию можно отсканировать при сборке: баркод из
+        заказа WB плюс основной и дополнительные баркоды товара. Маркировка на товаре
+        может быть наклеена по любому из баркодов карточки, а не по skus[0] заказа."""
+        codes = [self.barcode]
+        if self.product is not None:
+            codes.append(self.product.barcode)
+            codes.extend(self.product.extra_barcodes or [])
+        return list(dict.fromkeys(c for c in codes if c))
+
 
 class OrderItemMark(Base):
     """Код маркировки «Честный знак», привязанный к позиции заказа.

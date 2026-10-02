@@ -352,10 +352,12 @@ def sync_orders(db: Session) -> list[dict]:
     return results
 
 def _find_open_supply(db: Session, client: Client) -> Supply | None:
+    # Самая старая открытая поставка — «основная»: отдельные (срочные) поставки
+    # создаются позже, и новые заказы не должны попадать в них сами собой.
     return db.scalar(
         select(Supply)
         .where(Supply.client_id == client.id, Supply.status == SupplyStatus.OPEN)
-        .order_by(Supply.id.desc())
+        .order_by(Supply.id.asc())
     )
 
 
@@ -375,15 +377,17 @@ def _check_can_take_to_work(order: Order) -> None:
         )
 
 
-def _take_orders_to_work(db: Session, client: Client, orders: list[Order], wb_client: WBClient) -> None:
+def _take_orders_to_work(
+    db: Session, client: Client, orders: list[Order], wb_client: WBClient, *, new_supply: bool = False,
+) -> None:
     """Все заказы одного клиента — в его открытую поставку одним вызовом WB.
     Поставка, созданная здесь же, коммитится только вместе с заказами: если WB
     не принял заказы, она удаляется и в WB (best-effort), и локально — иначе
     оставалась пустая поставка, в которую потом безуспешно лезли все заказы."""
-    supply = _find_open_supply(db, client)
+    supply = None if new_supply else _find_open_supply(db, client)
     created = supply is None
     if created:
-        name = f"{client.name} {dt.date.today().isoformat()}"
+        name = f"{client.name} {dt.date.today().isoformat()}" + (" срочная" if new_supply else "")
         supply = supplies_service.create_supply(db, client, wb_client, name=name, commit=False)
     wb_supply_id = supply.wb_supply_id
     try:
@@ -410,7 +414,7 @@ def take_to_work(db: Session, order: Order, wb_client: WBClient) -> Order:
     return order
 
 
-def take_to_work_bulk(db: Session, order_ids: list[int]) -> list[dict]:
+def take_to_work_bulk(db: Session, order_ids: list[int], *, new_supply: bool = False) -> list[dict]:
     """Массовое «Взять в работу выбранные» (Этап 3, п.3.2) — одна поставка и
     один вызов WB на каждого клиента. Непригодный заказ (не NEW, проблема)
     отсеивается отдельно и не мешает остальным; сбой WB — на всю группу клиента."""
@@ -434,7 +438,7 @@ def take_to_work_bulk(db: Session, order_ids: list[int]) -> list[dict]:
         client = orders[0].client
         try:
             wb_client = get_wb_client(client)
-            _take_orders_to_work(db, client, orders, wb_client)
+            _take_orders_to_work(db, client, orders, wb_client, new_supply=new_supply)
             errors.update({oid: None for oid in ids})
         except AppError as exc:
             db.rollback()
@@ -448,14 +452,22 @@ def take_to_work_bulk(db: Session, order_ids: list[int]) -> list[dict]:
 
 def list_orders(
     db: Session, *, client_id: int | None = None, warehouse_id: str | None = None,
-    group: str | None = None, limit: int = 100, offset: int = 0,
+    group: str | None = None, sort: str | None = None, limit: int = 100, offset: int = 0,
 ) -> list[Order]:
+    # Новые и «на сборке» по умолчанию — самые старые сверху: за позднюю отгрузку
+    # WB штрафует, и срочные заказы не должны теряться внизу списка.
+    if sort is None:
+        sort = "oldest" if group in ("new", "assembly") else "newest"
+    if sort == "oldest":
+        order_by = (Order.created_at_wb.asc().nulls_last(), Order.id.asc())
+    else:
+        order_by = (Order.created_at_wb.desc().nulls_last(), Order.id.desc())
     stmt = (
         select(Order)
         .options(selectinload(Order.items).selectinload(OrderItem.product), selectinload(Order.client))
         # удалённый клиент скрыт отовсюду (problems.txt, п.5)
         .where(Order.client_id.not_in(deleted_client_ids()))
-        .order_by(Order.id.desc())
+        .order_by(*order_by)
     )
     if group in ("packed", "archive"):
         stmt = stmt.outerjoin(Supply, Supply.id == Order.supply_id)

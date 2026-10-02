@@ -17,6 +17,7 @@ class OrderItemOut(CamelModel):
     product_color: str | None = None
     product_vendor_code: str | None = None
     product_image_url: str | None = None
+    barcodes: list[str] = []
 
 
 class OrderOut(CamelModel):
@@ -44,6 +45,14 @@ class OrderCountersOut(CamelModel):
 
 class TakeToWorkBulkRequest(CamelModel):
     order_ids: list[int]
+    # True — заказы уходят в отдельную новую поставку, а не в основную открытую.
+    new_supply: bool = False
+
+
+class MoveOrdersRequest(CamelModel):
+    order_ids: list[int]
+    # None — создать новую поставку.
+    target_supply_id: int | None = None
 
 
 class TakeToWorkBulkResultOut(CamelModel):
@@ -79,6 +88,7 @@ class SupplyOrderOut(CamelModel):
     id: int
     wb_order_id: str
     status: str
+    created_at_wb: dt.datetime | None = None
 
 
 class SupplyOut(CamelModel):

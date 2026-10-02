@@ -20,7 +20,28 @@ from fulfil.models.fbs import Order, OrderItem, OrderItemMark, OrderStatus
 from fulfil.services.picking import build_pick_list, commit_pick_lines, rebuild_pick_list
 
 
+# Страховка к web/js/scan-layout.js: если сканер всё же напечатал код в русской
+# раскладке, возвращаем латиницу по позиции клавиши. Код ЧЗ (GS1) состоит только из
+# ASCII, поэтому кириллица в нём — всегда след раскладки, а не часть кода.
+_RU_TO_EN = dict(zip(
+    "йцукенгшщзхъфывапролджэячсмитьбюё"
+    "ЙЦУКЕНГШЩЗХЪФЫВАПРОЛДЖЭЯЧСМИТЬБЮЁ"
+    "\"№;:?.,/",
+    "qwertyuiop[]asdfghjkl;'zxcvbnm,.`"
+    "QWERTYUIOP{}ASDFGHJKL:\"ZXCVBNM<>~"
+    "@#$^&/?|",
+))
+_CYRILLIC = set("абвгдеёжзийклмнопрстуфхцчшщъыьэюяАБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ")
+
+
+def latinize_mark(raw_code: str) -> str:
+    if not any(ch in _CYRILLIC for ch in raw_code):
+        return raw_code
+    return "".join(_RU_TO_EN.get(ch, ch) for ch in raw_code)
+
+
 def scan_mark(db: Session, order_item: OrderItem, raw_code: str) -> OrderItemMark:
+    raw_code = latinize_mark(raw_code)
     if not raw_code:
         raise AppError("Пустой код.", status_code=400, reason_code="empty_code")
 

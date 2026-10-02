@@ -63,6 +63,7 @@
         <input type="checkbox" id="chkSelectAll" /> <span id="selectAllLabel">Выбрать все</span>
       </label>
       <button class="btn" id="btnTakeBulk" disabled>Взять в работу выбранные</button>
+      <button class="btn" id="btnTakeBulkSeparate" disabled title="Срочные заказы — в новую поставку, чтобы отгрузить их отдельно">В отдельную поставку</button>
       <button class="btn btn-primary" id="btnSync">Обновить из WB</button>
     </div>
   </div>
@@ -187,6 +188,7 @@
       btn.textContent = selected.size
         ? `Взять в работу выбранные (${selected.size})`
         : 'Взять в работу выбранные';
+      document.getElementById('btnTakeBulkSeparate').disabled = selected.size === 0;
     }
 
     function itemRowHtml(it) {
@@ -278,6 +280,7 @@
                   <div class="order-id">${Fulfil.esc(o.wbOrderId)}</div>
                   <span class="badge badge-muted">${Fulfil.esc(o.clientName || '')}</span>
                   <span class="badge ${cls}">${label}</span>
+                  ${Fulfil.orderAgeHtml(o.createdAtWb)}
                   ${problemBadgeHtml(o.problem)}
                 </div>
                 ${o.items.map(itemRowHtml).join('')}
@@ -361,17 +364,20 @@
       }
     }
 
-    document.getElementById('btnTakeBulk').addEventListener('click', async () => {
+    async function takeBulk(newSupply) {
       if (!selected.size) return;
       const ok = await Fulfil.confirmModal({
-        title: 'Взять выбранные в работу?',
-        message: `${selected.size} заказ(ов) будут подтверждены на Wildberries (добавлены в поставку). Обратной операции у WB нет.`,
+        title: newSupply ? 'Взять в работу в отдельную поставку?' : 'Взять выбранные в работу?',
+        message: newSupply
+          ? `${selected.size} заказ(ов) будут подтверждены на Wildberries и добавлены в НОВУЮ отдельную поставку (по одной на клиента). Обратной операции у WB нет.`
+          : `${selected.size} заказ(ов) будут подтверждены на Wildberries (добавлены в поставку). Обратной операции у WB нет.`,
         confirmLabel: 'Взять в работу',
       });
       if (!ok) return;
       try {
         const results = await Fulfil.api('POST', '/fbs/orders/take-to-work-bulk', {
           orderIds: Array.from(selected),
+          newSupply,
         });
         const ok_ = results.filter((r) => r.ok).length;
         const failed = results.filter((r) => !r.ok);
@@ -393,7 +399,10 @@
       } catch (err) {
         Fulfil.toast(Fulfil.errorText(err), 'error');
       }
-    });
+    }
+
+    document.getElementById('btnTakeBulk').addEventListener('click', () => takeBulk(false));
+    document.getElementById('btnTakeBulkSeparate').addEventListener('click', () => takeBulk(true));
 
     document.getElementById('btnSync').addEventListener('click', async () => {
       try {

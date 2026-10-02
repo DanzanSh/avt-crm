@@ -116,6 +116,13 @@ def test_sync_orders_resolves_second_sku_of_same_size(db, seller):
     assert product.barcode == primary_barcode
     assert product.extra_barcodes == [extra_barcode]
 
+    # Сводная сборка сверяет скан с OrderItemOut.barcodes — товар с маркировкой по
+    # основному баркоду карточки должен находить заказ, пришедший со вторым sku.
+    from fulfil.schemas.fbs import OrderOut
+
+    out = OrderOut.model_validate(created[0], from_attributes=True).model_dump(by_alias=True)
+    assert out["items"][0]["barcodes"] == [extra_barcode, primary_barcode]
+
 
 def test_sync_orders_records_error_and_rolls_back_batch(db, seller):
     """Сбой WB API среди заказов откатывает всю пачку этого вызова (как и было —
@@ -876,3 +883,146 @@ def test_supply_counters_and_group_filters(db, seller):
     assert {s.id for s in list_supplies(db, client_id=seller.id, group="in_delivery")} == {in_delivery_supply.id}
     assert {s.id for s in list_supplies(db, client_id=seller.id, group="accepted")} == {accepted_supply.id}
     assert {s.id for s in list_supplies(db, client_id=seller.id, group="other")} == {failed_supply.id}
+
+
+def test_list_orders_new_group_oldest_first(db, seller):
+    """Вкладки «Новые»/«На сборке» — самые старые заказы WB сверху (штрафы за
+    позднюю отгрузку), независимо от порядка импорта."""
+    now = dt.datetime.now(dt.timezone.utc)
+    fresh = Order(client_id=seller.id, wb_order_id="AGE-1", status=OrderStatus.NEW,
+                  created_at_wb=now - dt.timedelta(hours=1))
+    old = Order(client_id=seller.id, wb_order_id="AGE-2", status=OrderStatus.NEW,
+                created_at_wb=now - dt.timedelta(hours=30))
+    unknown = Order(client_id=seller.id, wb_order_id="AGE-3", status=OrderStatus.NEW)
+    db.add_all([fresh, old, unknown])
+    db.commit()
+
+    ids = [o.wb_order_id for o in list_orders(db, client_id=seller.id, group="new")]
+    assert ids == ["AGE-2", "AGE-1", "AGE-3"]
+
+    ids = [o.wb_order_id for o in list_orders(db, client_id=seller.id, group="new", sort="newest")]
+    assert ids == ["AGE-1", "AGE-2", "AGE-3"]
+
+
+# --- Перенос заказов в отдельную поставку -------------------------------------
+
+
+def _orders_in_supply(db, seller, wb, n=3):
+    orders = [Order(client_id=seller.id, wb_order_id=f"MV-{i}", status=OrderStatus.NEW) for i in range(n)]
+    db.add_all(orders)
+    db.commit()
+    for o in orders:
+        take_to_work(db, o, wb)
+    return orders
+
+
+def test_move_orders_to_new_supply(db, seller):
+    from fulfil.services.supplies import move_orders_to_supply
+
+    wb = WBMockClient(client_id=seller.id)
+    o1, o2, o3 = _orders_in_supply(db, seller, wb)
+    main_id = o1.supply_id
+
+    target = move_orders_to_supply(db, [o1.id, o2.id], wb_client=wb)
+
+    assert target.id != main_id and target.name.endswith("срочная")
+    db.refresh(o1); db.refresh(o2); db.refresh(o3)
+    assert (o1.supply_id, o2.supply_id, o3.supply_id) == (target.id, target.id, main_id)
+    assert o1.wb_supply_id == target.wb_supply_id
+    assert wb._supplies[target.wb_supply_id]["orders"] == ["MV-0", "MV-1"]
+    main = db.get(Supply, main_id)
+    assert wb._supplies[main.wb_supply_id]["orders"] == ["MV-2"]
+
+    # Новые заказы по-прежнему идут в основную (самую старую) поставку, а не в срочную.
+    extra = Order(client_id=seller.id, wb_order_id="MV-NEXT", status=OrderStatus.NEW)
+    db.add(extra)
+    db.commit()
+    take_to_work(db, extra, wb)
+    assert extra.supply_id == main_id
+
+
+def test_move_orders_to_existing_supply(db, seller):
+    from fulfil.services.supplies import move_orders_to_supply
+
+    wb = WBMockClient(client_id=seller.id)
+    o1, o2, _ = _orders_in_supply(db, seller, wb)
+    other = create_supply(db, seller, wb, name="Вторая")
+
+    target = move_orders_to_supply(db, [o2.id], target_supply_id=other.id, wb_client=wb)
+
+    assert target.id == other.id
+    db.refresh(o2)
+    assert o2.supply_id == other.id
+
+    with pytest.raises(AppError) as exc_info:
+        move_orders_to_supply(db, [o2.id], target_supply_id=other.id, wb_client=wb)
+    assert exc_info.value.reason_code == "already_in_supply"
+
+
+def test_move_orders_rejects_mixed_clients(db, seller):
+    from fulfil.services.supplies import move_orders_to_supply
+
+    other_client = make_client(db, name="Другой")
+    o1 = Order(client_id=seller.id, wb_order_id="MIX-1", status=OrderStatus.CONFIRMED)
+    o2 = Order(client_id=other_client.id, wb_order_id="MIX-2", status=OrderStatus.CONFIRMED)
+    db.add_all([o1, o2])
+    db.commit()
+
+    with pytest.raises(AppError) as exc_info:
+        move_orders_to_supply(db, [o1.id, o2.id], wb_client=WBMockClient(client_id=seller.id))
+    assert exc_info.value.reason_code == "client_mismatch"
+
+
+def test_move_orders_rejects_new_order_and_closed_source(db, seller):
+    from fulfil.services.supplies import move_orders_to_supply
+
+    wb = WBMockClient(client_id=seller.id)
+    new_order = Order(client_id=seller.id, wb_order_id="MV-NEW", status=OrderStatus.NEW)
+    db.add(new_order)
+    db.commit()
+    with pytest.raises(AppError) as exc_info:
+        move_orders_to_supply(db, [new_order.id], wb_client=wb)
+    assert exc_info.value.reason_code == "wrong_status"
+
+    [order] = _orders_in_supply(db, seller, wb, n=1)
+    db.get(Supply, order.supply_id).status = SupplyStatus.IN_DELIVERY
+    db.commit()
+    with pytest.raises(AppError) as exc_info:
+        move_orders_to_supply(db, [order.id], wb_client=wb)
+    assert exc_info.value.reason_code == "wrong_status"
+
+
+def test_move_orders_wb_failure_removes_created_supply(db, seller):
+    from fulfil.services.supplies import move_orders_to_supply
+
+    wb = WBMockClient(client_id=seller.id)
+    [order] = _orders_in_supply(db, seller, wb, n=1)
+    main_id = order.supply_id
+
+    class _FailingMock(WBMockClient):
+        def add_orders_to_supply(self, supply_id, order_ids):
+            raise WbApiError("Wildberries API вернул 409")
+
+    failing = _FailingMock(client_id=seller.id)
+    with pytest.raises(WbApiError):
+        move_orders_to_supply(db, [order.id], wb_client=failing)
+
+    assert db.scalar(select(func.count()).select_from(Supply).where(Supply.client_id == seller.id)) == 1
+    assert failing.list_supplies()["supplies"] == []
+    db.refresh(order)
+    assert order.supply_id == main_id
+
+
+def test_take_to_work_bulk_new_supply(db, seller, monkeypatch):
+    wb = WBMockClient(client_id=seller.id)
+    monkeypatch.setattr("fulfil.services.orders.get_wb_client", lambda client: wb)
+    [first] = _orders_in_supply(db, seller, wb, n=1)
+    urgent = Order(client_id=seller.id, wb_order_id="URG-1", status=OrderStatus.NEW)
+    db.add(urgent)
+    db.commit()
+
+    results = take_to_work_bulk(db, [urgent.id], new_supply=True)
+
+    assert results[0]["ok"]
+    db.refresh(urgent)
+    assert urgent.supply_id not in (None, first.supply_id)

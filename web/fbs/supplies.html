@@ -27,6 +27,9 @@
     .orders-list[hidden] { display: none; }
     .order-line { display: flex; align-items: center; gap: 8px; font-size: 15px; }
     .order-line .order-num { font-family: var(--mono); color: var(--text-2); }
+    .order-line .chk-move { flex: none; }
+    .move-bar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 8px 0 4px; }
+    .move-bar .hint { font-size: 14px; color: var(--text-2); }
   </style>
 </head>
 <body>
@@ -57,6 +60,16 @@
     };
 
     const ASSEMBLED_ORDER_STATUSES = new Set(['packed', 'in_supply', 'shipped', 'delivered']);
+
+    const ORDER_STATUS_LABELS = {
+      new: 'Новый', confirmed: 'Подтверждён', in_assembly: 'В сборке', packed: 'Собран',
+      in_supply: 'В поставке', shipped: 'Отгружен', delivered: 'Доставлен', cancelled: 'Отменён',
+    };
+    // Заказы, которые WB даёт перенести в другую открытую поставку (статус confirm).
+    const MOVABLE_ORDER_STATUSES = new Set(['confirmed', 'in_assembly', 'packed']);
+    // Выбранные для переноса заказы: supplyId -> Set(orderId).
+    const moveSelection = new Map();
+    let lastSupplies = [];
 
     const TABS = [
       { key: 'assembly', label: 'На сборке' },
@@ -110,9 +123,33 @@
       }
     }
 
-    function ordersLineHtml(o) {
-      const [label] = STATUS_LABELS[o.status] || [o.status];
-      return `<div class="order-line"><span class="order-num">${Fulfil.esc(o.wbOrderId)}</span><span>${Fulfil.esc(label || o.status)}</span></div>`;
+    function ordersLineHtml(o, s) {
+      const label = ORDER_STATUS_LABELS[o.status] || o.status;
+      const sel = moveSelection.get(s.id);
+      const chk =
+        s.status === 'open' && MOVABLE_ORDER_STATUSES.has(o.status)
+          ? `<input type="checkbox" class="chk-move" data-supply="${s.id}" data-id="${o.id}" ${sel && sel.has(o.id) ? 'checked' : ''} />`
+          : '';
+      return `<div class="order-line">${chk}<span class="order-num">${Fulfil.esc(o.wbOrderId)}</span>
+        <span>${Fulfil.esc(label)}</span>${Fulfil.orderAgeHtml(o.createdAtWb)}</div>`;
+    }
+
+    // Самые старые заказы сверху — их отгружают в первую очередь.
+    function byAge(a, b) {
+      const ta = a.createdAtWb ? Date.parse(a.createdAtWb) : Infinity;
+      const tb = b.createdAtWb ? Date.parse(b.createdAtWb) : Infinity;
+      return ta - tb;
+    }
+
+    function moveBarHtml(s) {
+      if (s.status !== 'open' || !s.orders.some((o) => MOVABLE_ORDER_STATUSES.has(o.status))) return '';
+      const n = (moveSelection.get(s.id) || new Set()).size;
+      const hasTargets = lastSupplies.some((x) => x.id !== s.id && x.clientId === s.clientId && x.status === 'open');
+      return `<div class="move-bar">
+        <button class="btn btn-move-new" data-id="${s.id}" ${n ? '' : 'disabled'}>В новую поставку${n ? ` (${n})` : ''}</button>
+        ${hasTargets ? `<button class="btn btn-move-to" data-id="${s.id}" ${n ? '' : 'disabled'}>Перенести в…</button>` : ''}
+        ${n ? '' : '<span class="hint">Отметьте заказы, чтобы отгрузить их отдельной поставкой</span>'}
+      </div>`;
     }
 
     async function load() {
@@ -137,6 +174,7 @@
                 Показаны первые ${supplies.length} из ${totalInTab} — уточните фильтр по клиенту, чтобы увидеть остальные.
               </div>`
             : '';
+        lastSupplies = supplies;
         list.innerHTML = truncatedNotice + supplies
           .map((s) => {
             const [label, cls] = STATUS_LABELS[s.status] || [s.status, 'badge-muted'];
@@ -158,7 +196,8 @@
               ${s.orders.length ? `· <button class="orders-toggle" data-id="${s.id}">${isExpanded ? 'Скрыть' : 'Показать'} заказы</button>` : ''}
             </div>
             <div class="orders-list" id="orders-${s.id}" ${isExpanded ? '' : 'hidden'}>
-              ${s.orders.map(ordersLineHtml).join('')}
+              ${moveBarHtml(s)}
+              ${s.orders.slice().sort(byAge).map((o) => ordersLineHtml(o, s)).join('')}
             </div>
             <div class="supply-actions">
               ${canClose && s.orders.some((o) => o.status === 'confirmed' || o.status === 'in_assembly') ? `<a class="btn btn-primary" href="/fbs/picking.html?batch=1&supplyId=${s.id}">Собрать</a>` : ''}
@@ -182,6 +221,22 @@
             b.textContent = (expanded.has(id) ? 'Скрыть' : 'Показать') + ' заказы';
           })
         );
+        document.querySelectorAll('.chk-move').forEach((chk) =>
+          chk.addEventListener('change', () => {
+            const supplyId = Number(chk.dataset.supply);
+            const sel = moveSelection.get(supplyId) || new Set();
+            if (chk.checked) sel.add(Number(chk.dataset.id));
+            else sel.delete(Number(chk.dataset.id));
+            moveSelection.set(supplyId, sel);
+            const bar = document.querySelector(`#orders-${supplyId} .move-bar`);
+            const s = lastSupplies.find((x) => x.id === supplyId);
+            if (bar && s) {
+              bar.outerHTML = moveBarHtml(s);
+              bindMoveButtons();
+            }
+          })
+        );
+        bindMoveButtons();
         document.querySelectorAll('.btn-close').forEach((b) => b.addEventListener('click', () => closeSupply(b.dataset.id)));
         document.querySelectorAll('.btn-delete').forEach((b) =>
           b.addEventListener('click', () => deleteSupply(b.dataset.id, b.dataset.name))
@@ -225,6 +280,59 @@
         Fulfil.toast(Fulfil.errorText(err), 'error');
       }
     });
+
+    function bindMoveButtons() {
+      document.querySelectorAll('.btn-move-new').forEach((b) => {
+        b.onclick = () => moveOrders(Number(b.dataset.id), null);
+      });
+      document.querySelectorAll('.btn-move-to').forEach((b) => {
+        b.onclick = () => chooseTargetAndMove(Number(b.dataset.id));
+      });
+    }
+
+    async function chooseTargetAndMove(sourceId) {
+      const source = lastSupplies.find((x) => x.id === sourceId);
+      const targets = lastSupplies.filter(
+        (x) => x.id !== sourceId && x.clientId === source.clientId && x.status === 'open'
+      );
+      const values = await Fulfil.formModal({
+        title: 'Перенести заказы',
+        submitLabel: 'Перенести',
+        fields: [
+          {
+            id: 'targetId', label: 'В поставку', type: 'select', required: true, value: targets[0].id,
+            options: targets.map((t) => ({
+              value: t.id,
+              label: `${t.wbSupplyId || '—'}${t.name ? ' · ' + t.name : ''} (${t.orders.length} ${Fulfil.plural(t.orders.length, 'заказ', 'заказа', 'заказов')})`,
+            })),
+          },
+        ],
+      });
+      if (!values) return;
+      moveOrders(sourceId, Number(values.targetId));
+    }
+
+    async function moveOrders(sourceId, targetSupplyId) {
+      const orderIds = [...(moveSelection.get(sourceId) || [])];
+      if (!orderIds.length) return;
+      const ok = await Fulfil.confirmModal({
+        title: targetSupplyId ? 'Перенести заказы?' : 'Создать отдельную поставку?',
+        message: targetSupplyId
+          ? `${orderIds.length} ${Fulfil.plural(orderIds.length, 'заказ будет перенесён', 'заказа будут перенесены', 'заказов будут перенесены')} в выбранную поставку на Wildberries.`
+          : `На Wildberries будет создана новая поставка, и в неё перейдут ${orderIds.length} ${Fulfil.plural(orderIds.length, 'выбранный заказ', 'выбранных заказа', 'выбранных заказов')}.`,
+        confirmLabel: 'Перенести',
+      });
+      if (!ok) return;
+      try {
+        const target = await Fulfil.api('POST', '/fbs/supplies/move-orders', { orderIds, targetSupplyId });
+        moveSelection.delete(sourceId);
+        expanded.add(target.id);
+        Fulfil.toast(`Заказы перенесены в поставку ${target.wbSupplyId || target.name || ''}`);
+        load();
+      } catch (err) {
+        Fulfil.toast(Fulfil.errorText(err), 'error');
+      }
+    }
 
     async function closeSupply(id) {
       const ok = await Fulfil.confirmModal({
